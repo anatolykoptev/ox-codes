@@ -6,6 +6,7 @@ use grep_regex::RegexMatcherBuilder;
 use ignore::WalkBuilder;
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
+use crate::grep_filter::build_globset;
 use crate::types::{ScopedSearchInput, SearchMatch, SearchResponse};
 use ox_langs::{get_language, get_scope_query, ScopeKind};
 
@@ -25,6 +26,9 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
 
     let query = Query::new(&lang_cfg.language, query_str)?;
 
+    let exclude = input.exclude_glob.as_deref()
+        .map(build_globset).transpose()?;
+
     let mut all_matches = Vec::new();
     let root = Path::new(&input.root);
 
@@ -41,6 +45,11 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
         }
 
         let rel_path = path.strip_prefix(root).unwrap_or(path);
+        if let Some(ref exc) = exclude {
+            if exc.is_match(rel_path) {
+                continue;
+            }
+        }
         let source = match std::fs::read(path) {
             Ok(s) => s,
             Err(_) => continue,
@@ -170,6 +179,7 @@ type Config struct {
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
+            exclude_glob: None,
         };
         let result = scoped_search(input).unwrap();
         // Only TODOs inside function bodies (line 7 comment, line 8 string)
@@ -188,6 +198,7 @@ type Config struct {
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
+            exclude_glob: None,
         };
         let result = scoped_search(input).unwrap();
         // Comments with TODO: line 3, line 7, line 12
@@ -205,6 +216,7 @@ type Config struct {
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
+            exclude_glob: None,
         };
         let result = scoped_search(input).unwrap();
         // Only "hello TODO" string
@@ -222,6 +234,7 @@ type Config struct {
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
+            exclude_glob: None,
         };
         assert!(scoped_search(input).is_err());
     }

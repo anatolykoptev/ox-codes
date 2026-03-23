@@ -9,6 +9,7 @@ use ast_grep_core::{AstGrep, Language as AstLang};
 use ignore::WalkBuilder;
 use ox_langs::detect_language;
 
+use crate::grep_filter::build_globset;
 use crate::types::{SearchMatch, SearchResponse, StructuralSearchInput};
 
 // ── Language wrapper ──────────────────────────────────────────────────────────
@@ -156,6 +157,9 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
     let pattern = Pattern::try_new(&input.pattern, wrapper.clone())
         .map_err(|e| anyhow::anyhow!("invalid pattern '{}': {e}", input.pattern))?;
 
+    let exclude = input.exclude_glob.as_deref()
+        .map(build_globset).transpose()?;
+
     let root = Path::new(&input.root);
     let mut all_matches: Vec<SearchMatch> = Vec::new();
 
@@ -169,6 +173,12 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
         let path = entry.path();
         if !file_matches_lang(path, &lang_name) {
             continue;
+        }
+        if let Some(ref exc) = exclude {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            if exc.is_match(rel) {
+                continue;
+            }
         }
 
         let src = match std::fs::read_to_string(path) {
@@ -252,6 +262,7 @@ func foo() error {
             pattern: "if $ERR != nil { return $ERR }".into(),
             language: "go".into(),
             max_results: 50,
+            exclude_glob: None,
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -274,6 +285,7 @@ func foo() error {
             pattern: "if $X != nil { return $X }".into(),
             language: "go".into(),
             max_results: 50,
+            exclude_glob: None,
         };
         let result = structural_search(input).unwrap();
         assert_eq!(result.matches.len(), 0);

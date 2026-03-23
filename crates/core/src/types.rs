@@ -32,6 +32,8 @@ pub struct ScopedSearchInput {
     pub max_results: usize,
     #[serde(default = "default_true")]
     pub case_sensitive: bool,
+    #[serde(default)]
+    pub exclude_glob: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +43,8 @@ pub struct StructuralSearchInput {
     pub language: String,
     #[serde(default = "default_max_results")]
     pub max_results: usize,
+    #[serde(default)]
+    pub exclude_glob: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
