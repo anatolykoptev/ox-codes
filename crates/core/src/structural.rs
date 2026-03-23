@@ -127,6 +127,30 @@ fn lang_wrapper(name: &str) -> Option<LangWrapper> {
             tree_sitter_c_sharp::LANGUAGE.into(),
             EXPANDO,
         )),
+        "php" => Some(LangWrapper::new(
+            tree_sitter_php::LANGUAGE_PHP.into(),
+            EXPANDO,
+        )),
+        "bash" | "sh" => Some(LangWrapper::new(
+            tree_sitter_bash::LANGUAGE.into(),
+            EXPANDO,
+        )),
+        "lua" => Some(LangWrapper::new(
+            tree_sitter_lua::LANGUAGE.into(),
+            EXPANDO,
+        )),
+        "swift" => Some(LangWrapper::new(
+            tree_sitter_swift::LANGUAGE.into(),
+            EXPANDO,
+        )),
+        "kotlin" | "kt" => Some(LangWrapper::new(
+            tree_sitter_kotlin_ng::LANGUAGE.into(),
+            EXPANDO,
+        )),
+        "zig" => Some(LangWrapper::new(
+            tree_sitter_zig::LANGUAGE.into(),
+            EXPANDO,
+        )),
         _ => None,
     }
 }
@@ -157,6 +181,8 @@ fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
             | ("rb", "ruby")
             | ("c#", "csharp")
             | ("cs", "csharp")
+            | ("sh", "bash")
+            | ("kt", "kotlin")
     )
 }
 

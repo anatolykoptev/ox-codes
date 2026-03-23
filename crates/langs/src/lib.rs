@@ -1,12 +1,18 @@
+mod bash;
 mod c;
 mod cpp;
 mod csharp;
 mod go;
 mod java;
+mod kotlin;
+mod lua;
+mod php;
 mod python;
 mod ruby;
 mod rust_lang;
+mod swift;
 mod typescript;
+mod zig;
 
 use tree_sitter::Language;
 
@@ -38,6 +44,12 @@ pub fn get_language(name: &str) -> Option<LangConfig> {
         "cpp" | "c++" | "cxx" => Some(cpp::config()),
         "ruby" | "rb" => Some(ruby::config()),
         "csharp" | "c#" | "cs" => Some(csharp::config()),
+        "php" => Some(php::config()),
+        "bash" | "sh" => Some(bash::config()),
+        "lua" => Some(lua::config()),
+        "swift" => Some(swift::config()),
+        "kotlin" | "kt" => Some(kotlin::config()),
+        "zig" => Some(zig::config()),
         _ => None,
     }
 }
@@ -54,6 +66,12 @@ pub fn get_scope_query(name: &str, scope: ScopeKind) -> Option<&'static str> {
         "cpp" | "c++" | "cxx" => Some(cpp::scope_query(scope)),
         "ruby" | "rb" => Some(ruby::scope_query(scope)),
         "csharp" | "c#" | "cs" => Some(csharp::scope_query(scope)),
+        "php" => Some(php::scope_query(scope)),
+        "bash" | "sh" => Some(bash::scope_query(scope)),
+        "lua" => Some(lua::scope_query(scope)),
+        "swift" => Some(swift::scope_query(scope)),
+        "kotlin" | "kt" => Some(kotlin::scope_query(scope)),
+        "zig" => Some(zig::scope_query(scope)),
         _ => None,
     }
 }
@@ -71,6 +89,12 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some("cpp"),
         "rb" => Some("ruby"),
         "cs" => Some("csharp"),
+        "php" => Some("php"),
+        "sh" | "bash" => Some("bash"),
+        "lua" => Some("lua"),
+        "swift" => Some("swift"),
+        "kt" | "kts" => Some("kotlin"),
+        "zig" => Some("zig"),
         _ => None,
     }
 }
@@ -81,6 +105,7 @@ mod tests {
 
     const ALL_LANGS: &[&str] = &[
         "go", "rust", "python", "typescript", "java", "c", "cpp", "ruby", "csharp",
+        "php", "bash", "lua", "swift", "kotlin", "zig",
     ];
 
     const ALL_SCOPES: &[ScopeKind] = &[
@@ -112,6 +137,14 @@ mod tests {
         assert!(get_language("rb").is_some());
         assert!(get_language("csharp").is_some());
         assert!(get_language("cs").is_some());
+        assert!(get_language("php").is_some());
+        assert!(get_language("bash").is_some());
+        assert!(get_language("sh").is_some());
+        assert!(get_language("lua").is_some());
+        assert!(get_language("swift").is_some());
+        assert!(get_language("kotlin").is_some());
+        assert!(get_language("kt").is_some());
+        assert!(get_language("zig").is_some());
         assert!(get_language("cobol").is_none());
     }
 
@@ -143,6 +176,14 @@ mod tests {
         assert_eq!(detect_language("main.hpp"), Some("cpp"));
         assert_eq!(detect_language("app.rb"), Some("ruby"));
         assert_eq!(detect_language("Program.cs"), Some("csharp"));
+        assert_eq!(detect_language("index.php"), Some("php"));
+        assert_eq!(detect_language("script.sh"), Some("bash"));
+        assert_eq!(detect_language("script.bash"), Some("bash"));
+        assert_eq!(detect_language("init.lua"), Some("lua"));
+        assert_eq!(detect_language("App.swift"), Some("swift"));
+        assert_eq!(detect_language("Main.kt"), Some("kotlin"));
+        assert_eq!(detect_language("build.kts"), Some("kotlin"));
+        assert_eq!(detect_language("main.zig"), Some("zig"));
         assert_eq!(detect_language("README.md"), None);
         assert_eq!(detect_language("Makefile"), None);
     }
