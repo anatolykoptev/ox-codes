@@ -1,0 +1,13 @@
+[package]
+name = "ox-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ox-core = { path = "../core" }
+axum = "0.8"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
