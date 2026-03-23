@@ -1,8 +1,15 @@
-use axum::{Router, routing::get};
+mod search;
+mod scoped;
+mod structural;
+
+use axum::{Router, routing::{get, post}};
 
 pub fn router() -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/search", post(search::handle))
+        .route("/search/scoped", post(scoped::handle))
+        .route("/search/structural", post(structural::handle))
 }
 
 async fn health() -> &'static str {
