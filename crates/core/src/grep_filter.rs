@@ -21,10 +21,17 @@ pub fn lang_extensions(lang: &str) -> Option<&'static [&'static str]> {
 }
 
 /// Build a GlobSet from a comma-separated list of patterns.
+/// Patterns without `/` are automatically prefixed with `**/` to match recursively
+/// (e.g. `*_test.go` becomes `**/*_test.go` to match `internal/foo_test.go`).
 pub fn build_globset(patterns: &str) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pat in patterns.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        builder.add(Glob::new(pat)?);
+        let effective = if !pat.contains('/') {
+            format!("**/{pat}")
+        } else {
+            pat.to_string()
+        };
+        builder.add(Glob::new(&effective)?);
     }
     Ok(builder.build()?)
 }
