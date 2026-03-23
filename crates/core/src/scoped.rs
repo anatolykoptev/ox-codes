@@ -45,10 +45,10 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
         }
 
         let rel_path = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref exc) = exclude {
-            if exc.is_match(rel_path) {
-                continue;
-            }
+        if let Some(ref exc) = exclude
+            && exc.is_match(rel_path)
+        {
+            continue;
         }
         let source = match std::fs::read(path) {
             Ok(s) => s,

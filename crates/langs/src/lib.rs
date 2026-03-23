@@ -1,6 +1,10 @@
+mod c;
+mod cpp;
+mod csharp;
 mod go;
 mod java;
 mod python;
+mod ruby;
 mod rust_lang;
 mod typescript;
 
@@ -30,6 +34,10 @@ pub fn get_language(name: &str) -> Option<LangConfig> {
         "python" | "py" => Some(python::config()),
         "typescript" | "ts" | "javascript" | "js" => Some(typescript::config()),
         "java" => Some(java::config()),
+        "c" => Some(c::config()),
+        "cpp" | "c++" | "cxx" => Some(cpp::config()),
+        "ruby" | "rb" => Some(ruby::config()),
+        "csharp" | "c#" | "cs" => Some(csharp::config()),
         _ => None,
     }
 }
@@ -42,6 +50,10 @@ pub fn get_scope_query(name: &str, scope: ScopeKind) -> Option<&'static str> {
         "python" | "py" => Some(python::scope_query(scope)),
         "typescript" | "ts" | "javascript" | "js" => Some(typescript::scope_query(scope)),
         "java" => Some(java::scope_query(scope)),
+        "c" => Some(c::scope_query(scope)),
+        "cpp" | "c++" | "cxx" => Some(cpp::scope_query(scope)),
+        "ruby" | "rb" => Some(ruby::scope_query(scope)),
+        "csharp" | "c#" | "cs" => Some(csharp::scope_query(scope)),
         _ => None,
     }
 }
@@ -55,6 +67,10 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "py" => Some("python"),
         "ts" | "tsx" | "js" | "jsx" => Some("typescript"),
         "java" => Some("java"),
+        "c" | "h" => Some("c"),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some("cpp"),
+        "rb" => Some("ruby"),
+        "cs" => Some("csharp"),
         _ => None,
     }
 }
@@ -63,7 +79,9 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    const ALL_LANGS: &[&str] = &["go", "rust", "python", "typescript", "java"];
+    const ALL_LANGS: &[&str] = &[
+        "go", "rust", "python", "typescript", "java", "c", "cpp", "ruby", "csharp",
+    ];
 
     const ALL_SCOPES: &[ScopeKind] = &[
         ScopeKind::FunctionBodies,
@@ -87,6 +105,13 @@ mod tests {
         assert!(get_language("ts").is_some());
         assert!(get_language("js").is_some());
         assert!(get_language("java").is_some());
+        assert!(get_language("c").is_some());
+        assert!(get_language("cpp").is_some());
+        assert!(get_language("c++").is_some());
+        assert!(get_language("ruby").is_some());
+        assert!(get_language("rb").is_some());
+        assert!(get_language("csharp").is_some());
+        assert!(get_language("cs").is_some());
         assert!(get_language("cobol").is_none());
     }
 
@@ -111,6 +136,13 @@ mod tests {
         assert_eq!(detect_language("app.ts"), Some("typescript"));
         assert_eq!(detect_language("app.js"), Some("typescript"));
         assert_eq!(detect_language("Main.java"), Some("java"));
+        assert_eq!(detect_language("main.c"), Some("c"));
+        assert_eq!(detect_language("main.h"), Some("c"));
+        assert_eq!(detect_language("main.cpp"), Some("cpp"));
+        assert_eq!(detect_language("main.cc"), Some("cpp"));
+        assert_eq!(detect_language("main.hpp"), Some("cpp"));
+        assert_eq!(detect_language("app.rb"), Some("ruby"));
+        assert_eq!(detect_language("Program.cs"), Some("csharp"));
         assert_eq!(detect_language("README.md"), None);
         assert_eq!(detect_language("Makefile"), None);
     }

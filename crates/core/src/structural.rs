@@ -114,6 +114,19 @@ fn lang_wrapper(name: &str) -> Option<LangWrapper> {
             tree_sitter_java::LANGUAGE.into(),
             EXPANDO,
         )),
+        "c" => Some(LangWrapper::new(tree_sitter_c::LANGUAGE.into(), EXPANDO)),
+        "cpp" | "c++" | "cxx" => Some(LangWrapper::new(
+            tree_sitter_cpp::LANGUAGE.into(),
+            EXPANDO,
+        )),
+        "ruby" | "rb" => Some(LangWrapper::new(
+            tree_sitter_ruby::LANGUAGE.into(),
+            EXPANDO,
+        )),
+        "csharp" | "c#" | "cs" => Some(LangWrapper::new(
+            tree_sitter_c_sharp::LANGUAGE.into(),
+            EXPANDO,
+        )),
         _ => None,
     }
 }
@@ -139,6 +152,11 @@ fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
             | ("ts", "typescript")
             | ("js", "typescript")
             | ("javascript", "typescript")
+            | ("c++", "cpp")
+            | ("cxx", "cpp")
+            | ("rb", "ruby")
+            | ("c#", "csharp")
+            | ("cs", "csharp")
     )
 }
 
