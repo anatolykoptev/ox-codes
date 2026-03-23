@@ -201,6 +201,8 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
     let pattern = Pattern::try_new(&input.pattern, wrapper.clone())
         .map_err(|e| anyhow::anyhow!("invalid pattern '{}': {e}", input.pattern))?;
 
+    let include = input.file_glob.as_deref()
+        .map(build_globset).transpose()?;
     let exclude = input.exclude_glob.as_deref()
         .map(build_globset).transpose()?;
 
@@ -218,8 +220,13 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
         if !file_matches_lang(path, &lang_name) {
             continue;
         }
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        if let Some(ref inc) = include {
+            if !inc.is_match(rel) {
+                continue;
+            }
+        }
         if let Some(ref exc) = exclude {
-            let rel = path.strip_prefix(root).unwrap_or(path);
             if exc.is_match(rel) {
                 continue;
             }
@@ -306,6 +313,7 @@ func foo() error {
             pattern: "if $ERR != nil { return $ERR }".into(),
             language: "go".into(),
             max_results: 50,
+            file_glob: None,
             exclude_glob: None,
         };
         let result = structural_search(input).unwrap();
@@ -329,6 +337,7 @@ func foo() error {
             pattern: "if $X != nil { return $X }".into(),
             language: "go".into(),
             max_results: 50,
+            file_glob: None,
             exclude_glob: None,
         };
         let result = structural_search(input).unwrap();

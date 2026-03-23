@@ -26,6 +26,8 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
 
     let query = Query::new(&lang_cfg.language, query_str)?;
 
+    let include = input.file_glob.as_deref()
+        .map(build_globset).transpose()?;
     let exclude = input.exclude_glob.as_deref()
         .map(build_globset).transpose()?;
 
@@ -45,6 +47,11 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
         }
 
         let rel_path = path.strip_prefix(root).unwrap_or(path);
+        if let Some(ref inc) = include {
+            if !inc.is_match(rel_path) {
+                continue;
+            }
+        }
         if let Some(ref exc) = exclude
             && exc.is_match(rel_path)
         {
@@ -179,6 +186,7 @@ type Config struct {
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
+            file_glob: None,
             exclude_glob: None,
         };
         let result = scoped_search(input).unwrap();
@@ -198,6 +206,7 @@ type Config struct {
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
+            file_glob: None,
             exclude_glob: None,
         };
         let result = scoped_search(input).unwrap();
@@ -216,6 +225,7 @@ type Config struct {
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
+            file_glob: None,
             exclude_glob: None,
         };
         let result = scoped_search(input).unwrap();
@@ -234,6 +244,7 @@ type Config struct {
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
+            file_glob: None,
             exclude_glob: None,
         };
         assert!(scoped_search(input).is_err());
