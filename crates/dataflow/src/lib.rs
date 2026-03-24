@@ -1,4 +1,10 @@
 pub mod analysis;
+pub mod il;
+mod il_build_expr;
+mod il_build_lval;
+pub mod il_builder;
+#[cfg(test)]
+mod il_builder_tests;
 pub mod queries;
 pub mod scope_walker;
 pub mod types;
