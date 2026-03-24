@@ -70,11 +70,8 @@ pub(crate) fn func_name(expr: &Expr) -> Option<String> {
     }
 }
 
-fn matches_pattern(name: &str, pattern: &str) -> bool {
-    name == pattern || name.ends_with(pattern)
-}
+fn matches_pattern(name: &str, pattern: &str) -> bool { name == pattern || name.ends_with(pattern) }
 
-/// Extract (func_expr, span) from a source-call instruction, if present.
 fn source_call_info(instr: &Instr) -> Option<(&Expr, Span)> {
     match instr {
         Instr::Call { result: Some(_), func, span, .. } => Some((func, *span)),
