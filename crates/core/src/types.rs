@@ -51,6 +51,35 @@ pub struct StructuralSearchInput {
     pub exclude_glob: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RewriteInput {
+    pub root: String,
+    pub pattern: String,
+    pub rewrite: String,
+    pub language: String,
+    #[serde(default = "default_max_results")]
+    pub max_results: usize,
+    #[serde(default)]
+    pub file_glob: Option<String>,
+    #[serde(default)]
+    pub exclude_glob: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RewriteResponse {
+    pub files: Vec<RewriteFileResult>,
+    pub total_matches: usize,
+    pub total_files: usize,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RewriteFileResult {
+    pub file: String,
+    pub matches: usize,
+    pub diff: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
     pub matches: Vec<SearchMatch>,
