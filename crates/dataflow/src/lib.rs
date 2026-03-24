@@ -12,6 +12,7 @@ mod il_builder_tests;
 pub mod queries;
 pub mod reaching_defs;
 pub mod scope_walker;
+pub mod semantics;
 pub mod solver;
 pub mod taint;
 pub mod taint_rules;
