@@ -13,6 +13,10 @@ pub mod queries;
 pub mod reaching_defs;
 pub mod scope_walker;
 pub mod solver;
+pub mod taint;
+pub mod taint_rules;
+#[cfg(test)]
+mod taint_tests;
 pub mod types;
 
 pub use types::{

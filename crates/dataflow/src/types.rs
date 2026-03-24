@@ -93,6 +93,7 @@ pub enum FindingKind {
     ConstantValue,
     UninitializedVar,
     UnreachableCode,
+    TaintedSink,
 }
 
 /// A data-flow finding.
