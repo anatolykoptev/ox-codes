@@ -7,6 +7,7 @@ edition.workspace = true
 ox-langs = { path = "../langs" }
 tree-sitter = "0.26"
 smallvec = { version = "1", features = ["serde"] }
+petgraph = "0.7"
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

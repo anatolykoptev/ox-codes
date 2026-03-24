@@ -1,4 +1,6 @@
 pub mod analysis;
+pub mod cfg;
+pub mod cfg_builder;
 pub mod il;
 mod il_build_expr;
 mod il_build_lval;
