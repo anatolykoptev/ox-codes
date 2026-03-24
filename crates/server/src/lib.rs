@@ -1,5 +1,6 @@
-mod search;
+mod rewrite;
 mod scoped;
+mod search;
 mod structural;
 
 use axum::{Router, routing::{get, post}};
@@ -10,6 +11,7 @@ pub fn router() -> Router {
         .route("/search", post(search::handle))
         .route("/search/scoped", post(scoped::handle))
         .route("/search/structural", post(structural::handle))
+        .route("/rewrite", post(rewrite::handle))
 }
 
 async fn health() -> &'static str {
