@@ -16,7 +16,7 @@ use crate::types::{SearchMatch, SearchResponse, StructuralSearchInput};
 
 /// Wraps a tree-sitter language for use with ast-grep-core.
 #[derive(Clone)]
-struct LangWrapper {
+pub(crate) struct LangWrapper {
     ts_lang: TSLanguage,
     /// Languages that don't accept `$` as identifier start need a different
     /// expando char so that `$VAR` patterns parse correctly.
@@ -93,7 +93,7 @@ impl LanguageExt for LangWrapper {
 /// Returns a LangWrapper for the given (already lower-cased) language name.
 /// `µ` is used as the expando char for languages that don't accept `$` in
 /// identifiers; TypeScript/JS use `$` natively.
-fn lang_wrapper(name: &str) -> Option<LangWrapper> {
+pub(crate) fn lang_wrapper(name: &str) -> Option<LangWrapper> {
     const EXPANDO: char = 'µ';
     match name {
         "go" | "golang" => Some(LangWrapper::new(tree_sitter_go::LANGUAGE.into(), EXPANDO)),
@@ -159,7 +159,7 @@ fn lang_wrapper(name: &str) -> Option<LangWrapper> {
 
 /// Returns the file extension mapped to its canonical language name, or None.
 /// Used to compare against the requested language (including aliases).
-fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
+pub(crate) fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
     let detected = path
         .to_str()
         .and_then(detect_language)
@@ -221,15 +221,15 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
             continue;
         }
         let rel = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include {
-            if !inc.is_match(rel) {
-                continue;
-            }
+        if let Some(ref inc) = include
+            && !inc.is_match(rel)
+        {
+            continue;
         }
-        if let Some(ref exc) = exclude {
-            if exc.is_match(rel) {
-                continue;
-            }
+        if let Some(ref exc) = exclude
+            && exc.is_match(rel)
+        {
+            continue;
         }
 
         let src = match std::fs::read_to_string(path) {
