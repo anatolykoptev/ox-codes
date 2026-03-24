@@ -6,10 +6,10 @@ use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::WalkBuilder;
 
-use crate::types::{SearchInput, SearchMatch, SearchResponse};
+use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, SearchInput, SearchMatch};
 use crate::grep_filter::{build_globset, lang_extensions, matches_language};
 
-pub fn search(input: SearchInput) -> Result<SearchResponse> {
+pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
     let start = Instant::now();
 
     let matcher = RegexMatcherBuilder::new()
@@ -98,22 +98,91 @@ pub fn search(input: SearchInput) -> Result<SearchResponse> {
     // Rank by match density (stable sort, most matches first)
     per_file.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
-    // Flatten and truncate
-    let all_matches: Vec<SearchMatch> = per_file
+    // Expand matches if requested: group by file, read once, parse once
+    let do_expand = !matches!(input.expand, ExpandMode::None);
+    let expanded_per_file: Vec<Vec<ExpandedMatch>> = per_file
         .into_iter()
-        .flat_map(|(_, ms)| ms)
+        .map(|(rel_path, raw_matches)| {
+            if do_expand {
+                let full_path = root.join(&rel_path);
+                if let Ok(source) = std::fs::read(&full_path)
+                    && let Some(lang_name) = ox_langs::detect_language(&rel_path)
+                    && let Some(lang_cfg) = ox_langs::get_language(lang_name)
+                {
+                    let expanded_matches: Vec<ExpandedMatch> = raw_matches
+                        .into_iter()
+                        .filter_map(|m| {
+                            let byte_offset = line_to_byte_offset(&source, m.line);
+                            let expanded = crate::expand::find_enclosing_symbol(
+                                &source,
+                                &lang_cfg.language,
+                                byte_offset,
+                                &input.expand,
+                            );
+                            // Skip match if expanded body exceeds max_tokens
+                            if let (Some(max_tok), Some(blk)) = (input.max_tokens, &expanded)
+                                && blk.body.len() > max_tok
+                            {
+                                return None;
+                            }
+                            Some(ExpandedMatch {
+                                file: m.file,
+                                line: m.line,
+                                text: m.text,
+                                context: m.context,
+                                expanded,
+                            })
+                        })
+                        .collect();
+                    return expanded_matches;
+                }
+            }
+            // No expansion or language not detected — wrap as-is
+            raw_matches
+                .into_iter()
+                .map(|m| ExpandedMatch {
+                    file: m.file,
+                    line: m.line,
+                    text: m.text,
+                    context: m.context,
+                    expanded: None,
+                })
+                .collect()
+        })
+        .collect();
+
+    // Flatten and truncate
+    let all_matches: Vec<ExpandedMatch> = expanded_per_file
+        .into_iter()
+        .flatten()
         .collect();
 
     let total_matches = all_matches.len();
     let truncated = total_matches > input.max_results;
     let matches = all_matches.into_iter().take(input.max_results).collect();
 
-    Ok(SearchResponse {
+    Ok(ExpandedSearchResponse {
         matches,
         total_matches,
         truncated,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Return the byte offset of the start of `line_number` (1-based) in `source`.
+fn line_to_byte_offset(source: &[u8], line_number: usize) -> usize {
+    let mut current_line = 1usize;
+    for (i, &byte) in source.iter().enumerate() {
+        if current_line == line_number {
+            return i;
+        }
+        if byte == b'\n' {
+            current_line += 1;
+        }
+    }
+    0
 }
 
 // ── Sink implementation ───────────────────────────────────────────────────────
@@ -283,5 +352,18 @@ mod tests {
         let resp = search(make_input(dir.path().to_str().unwrap(), "hit")).unwrap();
         assert!(resp.matches.len() >= 4);
         assert_eq!(resp.matches[0].file, "b.go");
+    }
+
+    #[test]
+    fn test_grep_with_expand_function() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "main.go", "package main\n\nfunc handler() {\n    doQuery()\n}\n");
+        let mut inp = make_input(dir.path().to_str().unwrap(), "doQuery");
+        inp.expand = ExpandMode::Function;
+        let resp = search(inp).unwrap();
+        assert_eq!(resp.matches.len(), 1);
+        let block = resp.matches[0].expanded.as_ref().unwrap();
+        assert_eq!(block.symbol_name, "handler");
+        assert!(block.body.contains("doQuery()"));
     }
 }
