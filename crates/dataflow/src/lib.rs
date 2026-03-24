@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod cfg;
+pub mod cfg_analysis;
 pub mod cfg_builder;
 pub mod def_use;
 pub mod il;

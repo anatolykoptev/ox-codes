@@ -91,7 +91,8 @@ pub enum FindingKind {
     DeadStore,
     UnusedVariable,
     ConstantValue,
-    // Future: UninitializedVar, NullDeref, TaintedSink
+    UninitializedVar,
+    UnreachableCode,
 }
 
 /// A data-flow finding.
