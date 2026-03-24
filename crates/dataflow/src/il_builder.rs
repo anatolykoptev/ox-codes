@@ -1,7 +1,5 @@
 //! Translates tree-sitter ASTs into the three-address IL.
-//!
-//! Uses direct `node.kind()` dispatch (no tree-sitter queries) so it works
-//! with any language grammar. Per-language node kinds are matched inline.
+//! Uses direct `node.kind()` dispatch — no tree-sitter queries needed.
 
 use std::collections::HashMap;
 
@@ -199,6 +197,3 @@ impl<'a> IlBuilder<'a> {
         }
     }
 }
-
-// Expression building and statement helpers — split for 200-line limit.
-// Continued in il_build_expr.rs
