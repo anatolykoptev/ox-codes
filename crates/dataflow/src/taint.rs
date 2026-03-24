@@ -1,6 +1,4 @@
-//! Taint analysis engine — tracks tainted data from sources to sinks.
-//!
-//! Intraprocedural only: analyses a single function's CFG using def-use chains.
+//! Taint analysis — tracks data from sources to sinks (intraprocedural).
 
 use std::collections::{HashSet, VecDeque};
 
@@ -76,6 +74,15 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
     name == pattern || name.ends_with(pattern)
 }
 
+/// Extract (func_expr, span) from a source-call instruction, if present.
+fn source_call_info(instr: &Instr) -> Option<(&Expr, Span)> {
+    match instr {
+        Instr::Call { result: Some(_), func, span, .. } => Some((func, *span)),
+        Instr::Assign { rval: Expr::Call { func, .. }, span, .. } => Some((func, *span)),
+        _ => None,
+    }
+}
+
 fn find_tainted_defs(cfg: &Cfg, sources: &[TaintSource]) -> Vec<(usize, TaintSourceInfo)> {
     let mut result = Vec::new();
     let mut def_id = 0usize;
@@ -84,11 +91,11 @@ fn find_tainted_defs(cfg: &Cfg, sources: &[TaintSource]) -> Vec<(usize, TaintSou
             let is_def = matches!(
                 instr, Instr::Assign { .. } | Instr::Call { result: Some(_), .. }
             );
-            if let Instr::Call { result: Some(_), func, span, .. } = instr
+            if let Some((func, span)) = source_call_info(instr)
                 && let Some(fname) = func_name(func)
                 && sources.iter().any(|s| matches_pattern(&fname, &s.pattern))
             {
-                result.push((def_id, TaintSourceInfo { function: fname, span: *span }));
+                result.push((def_id, TaintSourceInfo { function: fname, span }));
             }
             if is_def { def_id += 1; }
         }

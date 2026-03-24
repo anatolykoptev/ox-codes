@@ -3,6 +3,7 @@ mod rewrite;
 mod scoped;
 mod search;
 mod structural;
+mod taint;
 
 use axum::{Router, routing::{get, post}};
 
@@ -14,6 +15,7 @@ pub fn router() -> Router {
         .route("/search/structural", post(structural::handle))
         .route("/rewrite", post(rewrite::handle))
         .route("/dataflow/analyze", post(dataflow::handle))
+        .route("/dataflow/taint", post(taint::handle))
 }
 
 async fn health() -> &'static str {

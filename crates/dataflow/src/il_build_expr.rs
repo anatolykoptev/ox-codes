@@ -92,6 +92,7 @@ impl<'a> IlBuilder<'a> {
     pub(crate) fn visit_expr_stmt(&mut self, node: Node) {
         match node.kind() {
             "call_expression" | "call" => self.visit_call_stmt(node),
+            "assignment" | "augmented_assignment" => self.visit_assignment(node),
             _ => {
                 let _ = self.build_expr(node);
             }
