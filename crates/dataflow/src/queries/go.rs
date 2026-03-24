@@ -6,12 +6,16 @@ pub struct GoQueries {
     language: Language,
 }
 
-impl GoQueries {
-    pub fn new() -> Self {
+impl Default for GoQueries {
+    fn default() -> Self {
         Self {
             language: ox_langs::get_language("go").unwrap().language,
         }
     }
+}
+
+impl GoQueries {
+    pub fn new() -> Self { Self::default() }
 }
 
 impl LangQueries for GoQueries {

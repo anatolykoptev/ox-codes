@@ -18,7 +18,6 @@ pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
         decl: Query::new(&lang, lq.declarations_query())?,
         assign: Query::new(&lang, lq.assignments_query())?,
         param: Query::new(&lang, lq.parameters_query())?,
-        _refs: Query::new(&lang, lq.references_query())?,
     };
     let mut ctx = WalkCtx { sid: 0, finished: Vec::new() };
     let mut stack = vec![make_scope(ScopeKind::Module, tree.root_node())];
@@ -29,7 +28,7 @@ pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
     Ok(ScopeChain { scopes: ctx.finished })
 }
 
-struct CompiledQueries { decl: Query, assign: Query, param: Query, _refs: Query }
+struct CompiledQueries { decl: Query, assign: Query, param: Query }
 struct WalkCtx { sid: u32, finished: Vec<Scope> }
 
 fn walk_node(
@@ -58,8 +57,8 @@ fn walk_node(
             if !cursor.goto_next_sibling() { break; }
         }
     }
-    if push.is_some() {
-        if let Some(s) = stack.pop() { ctx.finished.push(s); }
+    if push.is_some() && let Some(s) = stack.pop() {
+        ctx.finished.push(s);
     }
 }
 
@@ -70,6 +69,9 @@ fn scope_kind_for(kind: &str) -> Option<ScopeKind> {
         | "arrow_function" => Some(ScopeKind::Function),
         "for_statement" | "while_statement" | "for_range_statement"
         | "for_in_clause" => Some(ScopeKind::Loop),
+        // TODO(phase2): Add block scopes for if/else/match to handle
+        // variable shadowing correctly. Current approach is sound for
+        // dead-store and unused-var analysis but may miss scope boundaries.
         _ => None,
     }
 }

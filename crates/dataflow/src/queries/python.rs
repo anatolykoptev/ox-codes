@@ -6,12 +6,16 @@ pub struct PythonQueries {
     language: Language,
 }
 
-impl PythonQueries {
-    pub fn new() -> Self {
+impl Default for PythonQueries {
+    fn default() -> Self {
         Self {
             language: ox_langs::get_language("python").unwrap().language,
         }
     }
+}
+
+impl PythonQueries {
+    pub fn new() -> Self { Self::default() }
 }
 
 impl LangQueries for PythonQueries {
