@@ -53,56 +53,63 @@
 - [x] go-code `code_search` интеграция
 - [ ] `format: "markdown"` — ` ```lang ` блоки в output
 
-## Phase 3 — Advanced Query Language
+## Phase 3 — Data-Flow (Light) 🎯 next
 
-**Impact**: средний | **Effort**: средний
+**Impact**: очень высокий | **Effort**: высокий | **Уникальный дифференциатор**
 
-Единый query DSL вместо отдельных endpoint'ов.
+Ни один lightweight tool не делает taint tracking. Semgrep делает, но он тяжёлый и enterprise-only. Даже intra-function версия — киллер-фича.
 
-- [ ] `POST /query` — единый endpoint
-- [ ] Boolean: `AND`, `OR`, `NOT`
-- [ ] Комбинирование: `scope:function_bodies AND structural:"if $ERR != nil"`
-- [ ] Фильтры: `lang:go file:*_test.go -path:vendor`
-- [ ] Пагинация: `offset` + `limit`
+- [ ] Intra-function data flow: переменная от объявления до использования
+- [ ] `POST /trace-variable` — path данных внутри функции
+- [ ] Pattern: `$SOURCE -> ... -> $SINK` в structural queries
+- [ ] Детекция: неиспользуемые присваивания, shadowed variables
+- [ ] Базовый taint: пометить source (user input) → найти sink (SQL query, exec)
+- [ ] go-code интеграция: новый MCP tool `trace_variable`
 
 ## Phase 4 — Incremental Index
 
 **Impact**: высокий для scale | **Effort**: высокий
+
+Пока наши репо <100k файлов — ripgrep справляется. Нужен когда/если будем индексировать Linux kernel или monorepo.
 
 - [ ] Опциональный trigram index (Zoekt/Hound подход)
 - [ ] `POST /index` — построить/обновить индекс
 - [ ] Инвалидация по git diff
 - [ ] Fallback на ripgrep для неиндексированных путей
 
-## Phase 5 — Cross-Reference Engine
+## Phase 5 — Rewrite Write Mode
 
-**Impact**: средний (go-code частично покрывает) | **Effort**: высокий
+**Impact**: средний | **Effort**: низкий
 
-- [ ] tree-sitter extraction определений и ссылок
-- [ ] `POST /references` — find all usages
-- [ ] `POST /definitions` — go-to-definition
-- [ ] `POST /symbols` — outline файла/директории
+Сейчас rewrite — dry-run only. Добавить возможность применить изменения.
 
-## Phase 6 — Data-Flow (Light)
+- [ ] `POST /rewrite` + `apply: true` — записать изменения в файлы
+- [ ] Atomic: все файлы или ни одного (через tmpfile + rename)
+- [ ] Backup оригиналов (опционально)
 
-**Impact**: очень высокий | **Effort**: очень высокий
+## Backlog (низкий приоритет)
 
-- [ ] Intra-function data flow: переменная от объявления до использования
-- [ ] `POST /trace-variable`
-- [ ] Базовый taint: source (user input) → sink (SQL query)
+**Query DSL** — go-code уже маршрутизирует запросы, AI-агентам DSL не нужен.
+- [ ] `POST /query` с boolean + комбинированием scope/structural
+
+**Cross-Reference** — go-code `symbol_search` + `call_trace` покрывают.
+- [ ] `POST /references`, `/definitions`, `/symbols`
+
+**Markdown format** — expand output как ` ```lang ` блоки.
+- [ ] `format: "markdown"` параметр
 
 ---
 
 ## Приоритизация
 
-| Phase | Статус | Impact | Effort |
-|-------|--------|--------|--------|
-| 1. Rewrite | ✅ done | ★★★★★ | ★★ |
-| 2. Token-Aware | ✅ done | ★★★★★ | ★★★ |
-| 3. Query DSL | next | ★★★ | ★★★ |
-| 4. Index | planned | ★★★★ | ★★★★★ |
-| 5. Cross-Ref | planned | ★★★ | ★★★★★ |
-| 6. Data-Flow | planned | ★★★★★ | ★★★★★★ |
+| Phase | Статус | Impact | Effort | Почему |
+|-------|--------|--------|--------|--------|
+| 1. Rewrite | ✅ done | ★★★★★ | ★★ | — |
+| 2. Token-Aware | ✅ done | ★★★★★ | ★★★ | — |
+| 3. Data-Flow | 🎯 next | ★★★★★ | ★★★★★ | Уникальный, ни у кого нет в lightweight |
+| 4. Index | planned | ★★★★ | ★★★★★ | Нужен для scale >100k файлов |
+| 5. Write Mode | planned | ★★★ | ★ | Простое расширение Phase 1 |
+| Backlog | — | ★★ | ★★★ | go-code уже покрывает |
 
 ## Принципы
 
