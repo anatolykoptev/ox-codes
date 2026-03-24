@@ -285,6 +285,7 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ExpandMode;
     use std::fs;
     use tempfile::TempDir;
 
@@ -315,6 +316,8 @@ func foo() error {
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -339,6 +342,8 @@ func foo() error {
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = structural_search(input).unwrap();
         assert_eq!(result.matches.len(), 0);

@@ -160,6 +160,7 @@ impl Sink for CollectSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ExpandMode;
     use std::fs;
     use tempfile::TempDir;
 
@@ -174,6 +175,8 @@ mod tests {
             max_results: 50,
             case_sensitive: true,
             language: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         }
     }
 

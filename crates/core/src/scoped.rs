@@ -149,6 +149,7 @@ fn parse_scope_kind(s: &str) -> Result<ScopeKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ExpandMode;
     use std::fs;
     use tempfile::TempDir;
 
@@ -188,6 +189,8 @@ type Config struct {
             case_sensitive: true,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = scoped_search(input).unwrap();
         // Only TODOs inside function bodies (line 7 comment, line 8 string)
@@ -208,6 +211,8 @@ type Config struct {
             case_sensitive: true,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = scoped_search(input).unwrap();
         // Comments with TODO: line 3, line 7, line 12
@@ -227,6 +232,8 @@ type Config struct {
             case_sensitive: true,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = scoped_search(input).unwrap();
         // Only "hello TODO" string
@@ -246,6 +253,8 @@ type Config struct {
             case_sensitive: true,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         assert!(scoped_search(input).is_err());
     }
