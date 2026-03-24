@@ -1,3 +1,4 @@
+mod dataflow;
 mod rewrite;
 mod scoped;
 mod search;
@@ -12,6 +13,7 @@ pub fn router() -> Router {
         .route("/search/scoped", post(scoped::handle))
         .route("/search/structural", post(structural::handle))
         .route("/rewrite", post(rewrite::handle))
+        .route("/dataflow/analyze", post(dataflow::handle))
 }
 
 async fn health() -> &'static str {
