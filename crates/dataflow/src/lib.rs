@@ -1,4 +1,6 @@
+pub mod analysis;
 pub mod queries;
+pub mod scope_walker;
 pub mod types;
 
 pub use types::{
