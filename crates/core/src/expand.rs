@@ -92,6 +92,17 @@ fn extract_symbol_name(node: &tree_sitter::Node, source: &[u8]) -> String {
     "<anonymous>".to_string()
 }
 
+/// Wrap a body string in fenced code block if format is Markdown.
+pub fn wrap_body(body: String, format: crate::types::Format, lang: Option<&str>) -> String {
+    match format {
+        crate::types::Format::Markdown => {
+            let lang_str = lang.unwrap_or("text");
+            format!("```{lang_str}\n{body}\n```")
+        }
+        crate::types::Format::Plain => body,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

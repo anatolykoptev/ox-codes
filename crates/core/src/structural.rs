@@ -279,7 +279,10 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchR
                         continue;
                     }
                 }
-                block
+                block.map(|blk| crate::types::ExpandedBlock {
+                    body: crate::expand::wrap_body(blk.body, input.format, Some(&input.language)),
+                    ..blk
+                })
             } else {
                 None
             };
@@ -350,6 +353,7 @@ func foo() error {
             exclude_glob: None,
             expand: ExpandMode::default(),
             max_tokens: None,
+            format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -376,6 +380,7 @@ func foo() error {
             exclude_glob: None,
             expand: ExpandMode::default(),
             max_tokens: None,
+            format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
         assert_eq!(result.matches.len(), 0);
@@ -411,6 +416,7 @@ func other() {
             exclude_glob: None,
             expand: ExpandMode::Function,
             max_tokens: None,
+            format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
         assert_eq!(result.matches.len(), 1);

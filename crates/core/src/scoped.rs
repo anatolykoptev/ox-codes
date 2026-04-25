@@ -71,6 +71,8 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<ExpandedSearchResponse>
             &rel_path.to_string_lossy(),
             &input.expand,
             input.max_tokens,
+            input.format,
+            &input.language,
         );
         all_matches.extend(file_matches);
 
@@ -93,6 +95,7 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<ExpandedSearchResponse>
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_in_scopes(
     source: &[u8],
     language: &tree_sitter::Language,
@@ -101,6 +104,8 @@ fn search_in_scopes(
     rel_path: &str,
     expand: &ExpandMode,
     max_tokens: Option<usize>,
+    format: crate::types::Format,
+    lang: &str,
 ) -> Vec<ExpandedMatch> {
     let mut parser = Parser::new();
     if parser.set_language(language).is_err() {
@@ -144,7 +149,10 @@ fn search_in_scopes(
                                 continue;
                             }
                         }
-                        block
+                        block.map(|blk| crate::types::ExpandedBlock {
+                            body: crate::expand::wrap_body(blk.body, format, Some(lang)),
+                            ..blk
+                        })
                     } else {
                         None
                     };
@@ -223,6 +231,7 @@ type Config struct {
             exclude_glob: None,
             expand: ExpandMode::default(),
             max_tokens: None,
+            format: crate::types::Format::Plain,
         };
         let result = scoped_search(input).unwrap();
         // Only TODOs inside function bodies (line 7 comment, line 8 string)
@@ -245,6 +254,7 @@ type Config struct {
             exclude_glob: None,
             expand: ExpandMode::default(),
             max_tokens: None,
+            format: crate::types::Format::Plain,
         };
         let result = scoped_search(input).unwrap();
         // Comments with TODO: line 3, line 7, line 12
@@ -266,6 +276,7 @@ type Config struct {
             exclude_glob: None,
             expand: ExpandMode::default(),
             max_tokens: None,
+            format: crate::types::Format::Plain,
         };
         let result = scoped_search(input).unwrap();
         // Only "hello TODO" string
@@ -287,6 +298,7 @@ type Config struct {
             exclude_glob: None,
             expand: ExpandMode::default(),
             max_tokens: None,
+            format: crate::types::Format::Plain,
         };
         assert!(scoped_search(input).is_err());
     }
@@ -306,6 +318,7 @@ type Config struct {
             exclude_glob: None,
             expand: ExpandMode::Function,
             max_tokens: None,
+            format: crate::types::Format::Plain,
         };
         let result = scoped_search(input).unwrap();
         // The "TODO inside function" comment at line 7 should expand to main()

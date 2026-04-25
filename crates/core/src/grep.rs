@@ -125,6 +125,14 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
                             {
                                 return None;
                             }
+                            let expanded = expanded.map(|blk| crate::types::ExpandedBlock {
+                                body: crate::expand::wrap_body(
+                                    blk.body,
+                                    input.format,
+                                    input.language.as_deref(),
+                                ),
+                                ..blk
+                            });
                             Some(ExpandedMatch {
                                 file: m.file,
                                 line: m.line,
@@ -246,6 +254,7 @@ mod tests {
             language: None,
             expand: ExpandMode::default(),
             max_tokens: None,
+            format: crate::types::Format::Plain,
         }
     }
 
@@ -365,5 +374,30 @@ mod tests {
         let block = resp.matches[0].expanded.as_ref().unwrap();
         assert_eq!(block.symbol_name, "handler");
         assert!(block.body.contains("doQuery()"));
+    }
+
+    #[test]
+    fn test_expand_markdown_wraps_body() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir, "main.go", "package main\nfunc Foo() { x := 1\n_ = x\n}\n");
+        let inp = SearchInput {
+            root: dir.path().to_str().unwrap().into(),
+            pattern: "Foo".into(),
+            is_regex: false,
+            file_glob: None,
+            exclude_glob: None,
+            context_lines: 0,
+            max_results: 50,
+            case_sensitive: true,
+            language: Some("go".into()),
+            expand: ExpandMode::Function,
+            max_tokens: None,
+            format: crate::types::Format::Markdown,
+        };
+        let resp = search(inp).unwrap();
+        assert!(!resp.matches.is_empty(), "expected match");
+        let body = &resp.matches[0].expanded.as_ref().unwrap().body;
+        assert!(body.starts_with("```go"), "expected markdown fence, got: {}", &body[..body.len().min(50)]);
+        assert!(body.ends_with("```"), "expected closing fence");
     }
 }
