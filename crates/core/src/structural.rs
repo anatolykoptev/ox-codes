@@ -427,4 +427,38 @@ func other() {
         assert!(block.body.contains("db.Query()"));
         assert!(block.body.contains("return err"));
     }
+
+    /// Go method call patterns: `$RECV.Method($$$)` do NOT currently match
+    /// because ast-grep's tree-sitter Go grammar parses `s.BulkCopyInsert(ctx, a, b)`
+    /// as a `call_expression` whose `function` child is a `selector_expression`, not a
+    /// bare `identifier`. The pattern `$RECV.BulkCopyInsert($$$)` therefore does not
+    /// unify with the tree structure ast-grep sees.
+    ///
+    /// Workaround for callers: use a regex search (`/BulkCopyInsert/`) or a scoped
+    /// search instead. A future enhancement could normalise selector patterns.
+    #[test]
+    #[ignore = "known limitation: method-call patterns do not match selector_expression nodes"]
+    fn test_structural_go_method_call_limitation() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            "package main\nfunc f(s *Store) { s.BulkCopyInsert(ctx, a, b) }\n",
+        )
+        .unwrap();
+        // $RECV.MethodName($$$) does not match in the current ast-grep integration.
+        // This test is kept as a regression marker; remove #[ignore] when fixed.
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "$RECV.BulkCopyInsert($$$)".into(),
+            language: "go".into(),
+            max_results: 5,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = structural_search(input).unwrap();
+        assert!(!result.matches.is_empty(), "method call pattern should match");
+    }
 }
