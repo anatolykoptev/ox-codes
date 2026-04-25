@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{bail, Result};
 use ast_grep_core::matcher::{Pattern, PatternBuilder, PatternError};
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, TSLanguage};
-use ast_grep_core::{AstGrep, Language as AstLang};
+use ast_grep_core::{AstGrep, Language as AstLang, Matcher};
 use ignore::WalkBuilder;
 use ox_langs::detect_language;
 
@@ -188,6 +188,40 @@ pub(crate) fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// Build an ast-grep `Pattern` for a Go query, handling the Go-specific
+/// ambiguity where `X.Y(args)` at file scope is parsed as
+/// `type_conversion_expression` (package.Type(value)) instead of a
+/// `call_expression`.  We detect this by checking `potential_kinds()` after a
+/// first parse attempt, and if the result is a type-conversion we re-parse
+/// using `Pattern::contextual` with a function-body wrapper so that the
+/// fragment is unambiguously an expression statement.
+///
+/// Patterns that do NOT mis-parse (ERROR nodes, plain function calls, etc.)
+/// are returned as-is from the first attempt.
+fn build_pattern_for_go(query: &str, wrapper: &LangWrapper) -> Result<Pattern> {
+    let pattern = Pattern::try_new(query, wrapper.clone())
+        .map_err(|e| anyhow::anyhow!("invalid pattern '{query}': {e}"))?;
+
+    // `type_conversion_expression` is the tell: Go misparses `X.Y(args)` as
+    // `package.Type(value)`.  If the pattern anchors on that kind, it will
+    // never match call_expression nodes in real code.
+    let tc_kind = wrapper.kind_to_id("type_conversion_expression") as usize;
+    let is_misparse = pattern
+        .potential_kinds()
+        .map(|k| k.contains(tc_kind))
+        .unwrap_or(false);
+
+    if !is_misparse {
+        return Ok(pattern);
+    }
+
+    // Re-parse inside a function body so the fragment is an expression
+    // statement.  Pattern::contextual handles pre_process_pattern internally.
+    let wrapped = format!("func _() {{ {query} }}");
+    Pattern::contextual(&wrapped, "call_expression", wrapper.clone())
+        .map_err(|e| anyhow::anyhow!("invalid pattern '{query}': {e}"))
+}
+
 pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchResponse> {
     let start = Instant::now();
 
@@ -198,8 +232,14 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchR
     };
 
     // Pre-compile the pattern once; fail fast on invalid patterns.
-    let pattern = Pattern::try_new(&input.pattern, wrapper.clone())
-        .map_err(|e| anyhow::anyhow!("invalid pattern '{}': {e}", input.pattern))?;
+    // For Go, use a specialised builder that handles selector-expression
+    // ambiguity (X.Y(args) misparses as type_conversion_expression at file scope).
+    let pattern = if matches!(lang_name.as_str(), "go" | "golang") {
+        build_pattern_for_go(&input.pattern, &wrapper)
+    } else {
+        Pattern::try_new(&input.pattern, wrapper.clone())
+            .map_err(|e| anyhow::anyhow!("invalid pattern '{}': {e}", input.pattern))
+    }?;
 
     let include = input.file_glob.as_deref()
         .map(build_globset).transpose()?;
@@ -428,25 +468,13 @@ func other() {
         assert!(block.body.contains("return err"));
     }
 
-    /// Go method call patterns with metavar receiver AND arguments do NOT currently match.
+    /// Regression test: `$RECV.Method($$$)` matches `s.BulkCopyInsert(ctx, a, b)`.
     ///
-    /// Root cause: ast-grep's tree-sitter Go grammar represents `s.Method(args)` as a
-    /// `call_expression` whose `function` child is a `selector_expression` (not a bare
-    /// `identifier`). When the pattern uses a metavar receiver (`$RECV.Method(...)`), the
-    /// Go parser does not produce a `selector_expression` node, so ast-grep cannot unify
-    /// the two shapes.
-    ///
-    /// What works vs. what does not:
-    /// - `$RECV.Method()` (no-arg call) — WORKS (empty arg list unifies)
-    /// - `$RECV.Method($X)` (metavar sole arg) — FAILS
-    /// - `$RECV.Method($$$)` (`$$$` as sole arg) — FAILS
-    /// - `$RECV.Method($X, $$$)` (1 explicit arg + ellipsis) — WORKS
-    ///
-    /// Workaround for callers:
-    /// - Use `$RECV.MethodName($X, $$$)` to match calls with 1+ arguments.
-    /// - For counting all call sites, use a regex search (`/MethodName/`) or scoped search.
+    /// Previously this returned 0 matches because the Go grammar mis-parsed
+    /// `X.Y(args)` at file scope as `type_conversion_expression` (package.Type(value))
+    /// instead of `call_expression`.  `build_pattern_for_go` detects this and
+    /// re-parses via `Pattern::contextual` inside a function-body wrapper.
     #[test]
-    #[ignore = "known limitation: $RECV.Method($X) and $RECV.Method($$$) fail for selector_expression nodes"]
     fn test_structural_go_method_call_limitation() {
         let dir = TempDir::new().unwrap();
         fs::write(
@@ -454,10 +482,6 @@ func other() {
             "package main\nfunc f(s *Store) { s.BulkCopyInsert(ctx, a, b) }\n",
         )
         .unwrap();
-        // Limitation: $RECV.Method($$$) alone as sole argument doesn't match multi-arg calls.
-        // Workaround: use $RECV.Method($X, $$$) to match calls with at least one arg.
-        // For counting all call sites, use a regex search (/BulkCopyInsert/) or scoped search.
-        // Remove #[ignore] if ast-grep adds selector_expression unification support.
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "$RECV.BulkCopyInsert($$$)".into(),
@@ -470,7 +494,31 @@ func other() {
             format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
-        assert!(!result.matches.is_empty(), "method call pattern should match");
+        assert!(!result.matches.is_empty(), "$RECV.Method($$$) should match multi-arg method call");
+    }
+
+    /// Additional regression: `$RECV.BulkInsert($$$)` matches `s.BulkInsert(ctx, a, b)`.
+    #[test]
+    fn test_structural_go_method_call_with_ellipsis() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            "package main\nfunc f(s *Store) { s.BulkInsert(ctx, a, b) }\n",
+        )
+        .unwrap();
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "$RECV.BulkInsert($$$)".into(),
+            language: "go".into(),
+            max_results: 5,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = structural_search(input).unwrap();
+        assert!(!result.matches.is_empty(), "method call with ellipsis should match");
     }
 
     /// Verify that plain function calls with ellipsis work correctly.
