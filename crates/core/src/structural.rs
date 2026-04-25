@@ -428,16 +428,25 @@ func other() {
         assert!(block.body.contains("return err"));
     }
 
-    /// Go method call patterns: `$RECV.Method($$$)` do NOT currently match
-    /// because ast-grep's tree-sitter Go grammar parses `s.BulkCopyInsert(ctx, a, b)`
-    /// as a `call_expression` whose `function` child is a `selector_expression`, not a
-    /// bare `identifier`. The pattern `$RECV.BulkCopyInsert($$$)` therefore does not
-    /// unify with the tree structure ast-grep sees.
+    /// Go method call patterns with metavar receiver AND arguments do NOT currently match.
     ///
-    /// Workaround for callers: use a regex search (`/BulkCopyInsert/`) or a scoped
-    /// search instead. A future enhancement could normalise selector patterns.
+    /// Root cause: ast-grep's tree-sitter Go grammar represents `s.Method(args)` as a
+    /// `call_expression` whose `function` child is a `selector_expression` (not a bare
+    /// `identifier`). When the pattern uses a metavar receiver (`$RECV.Method(...)`), the
+    /// Go parser does not produce a `selector_expression` node, so ast-grep cannot unify
+    /// the two shapes.
+    ///
+    /// What works vs. what does not:
+    /// - `$RECV.Method()` (no-arg call) — WORKS (empty arg list unifies)
+    /// - `$RECV.Method($X)` (metavar sole arg) — FAILS
+    /// - `$RECV.Method($$$)` (`$$$` as sole arg) — FAILS
+    /// - `$RECV.Method($X, $$$)` (1 explicit arg + ellipsis) — WORKS
+    ///
+    /// Workaround for callers:
+    /// - Use `$RECV.MethodName($X, $$$)` to match calls with 1+ arguments.
+    /// - For counting all call sites, use a regex search (`/MethodName/`) or scoped search.
     #[test]
-    #[ignore = "known limitation: method-call patterns do not match selector_expression nodes"]
+    #[ignore = "known limitation: $RECV.Method($X) and $RECV.Method($$$) fail for selector_expression nodes"]
     fn test_structural_go_method_call_limitation() {
         let dir = TempDir::new().unwrap();
         fs::write(
@@ -445,8 +454,10 @@ func other() {
             "package main\nfunc f(s *Store) { s.BulkCopyInsert(ctx, a, b) }\n",
         )
         .unwrap();
-        // $RECV.MethodName($$$) does not match in the current ast-grep integration.
-        // This test is kept as a regression marker; remove #[ignore] when fixed.
+        // Limitation: $RECV.Method($$$) alone as sole argument doesn't match multi-arg calls.
+        // Workaround: use $RECV.Method($X, $$$) to match calls with at least one arg.
+        // For counting all call sites, use a regex search (/BulkCopyInsert/) or scoped search.
+        // Remove #[ignore] if ast-grep adds selector_expression unification support.
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "$RECV.BulkCopyInsert($$$)".into(),
@@ -461,4 +472,80 @@ func other() {
         let result = structural_search(input).unwrap();
         assert!(!result.matches.is_empty(), "method call pattern should match");
     }
+
+    /// Verify that plain function calls with ellipsis work correctly.
+    /// `foo($$$)` matches `foo(ctx, a, b)` — ellipsis in plain (non-method) calls is fine.
+    #[test]
+    fn test_structural_go_plain_func_ellipsis() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            "package main\nfunc f() { foo(ctx, a, b) }\n",
+        )
+        .unwrap();
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "foo($$$)".into(),
+            language: "go".into(),
+            max_results: 5,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = structural_search(input).unwrap();
+        assert!(!result.matches.is_empty(), "foo($$$) should match foo(ctx, a, b)");
+    }
+
+    /// Verify that `$RECV.Method()` (no-arg call) works despite the selector_expression issue.
+    #[test]
+    fn test_structural_go_method_no_args() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            "package main\nfunc f(s *Store) { s.Close() }\n",
+        )
+        .unwrap();
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "$RECV.Close()".into(),
+            language: "go".into(),
+            max_results: 5,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = structural_search(input).unwrap();
+        assert!(!result.matches.is_empty(), "$RECV.Method() should match no-arg method call");
+    }
+
+    /// Workaround test: `$RECV.Method($X, $$$)` matches method calls with 1+ arguments.
+    /// This is the recommended pattern when you need to match multi-arg method calls.
+    #[test]
+    fn test_structural_go_method_call_one_plus_args() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            "package main\nfunc f(s *Store) { s.Insert(ctx, a, b) }\n",
+        )
+        .unwrap();
+        // Method + at least 1 arg pattern: $RECV.Method($X, $$$) matches multi-arg calls
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "$RECV.Insert($X, $$$)".into(),
+            language: "go".into(),
+            max_results: 5,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = structural_search(input).unwrap();
+        assert!(!result.matches.is_empty(), "$RECV.Method($X, $$$) should match multi-arg method call");
+    }
+
 }
