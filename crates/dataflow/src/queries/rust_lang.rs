@@ -46,6 +46,8 @@ impl LangQueries for RustQueries {
     fn parameters_query(&self) -> &'static str {
         r#"
         (parameter pattern: (identifier) @name)
+        (parameter pattern: (mut_pattern (identifier) @name))
+        (self_parameter (self) @name)
         "#
     }
 
@@ -177,11 +179,31 @@ mod tests {
         let q = queries();
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&q.language).unwrap();
-        let src = b"fn f() { println!(\"hello\"); }";
+        let src = b"fn f() { foo(1); }";
         let tree = parser.parse(src, None).unwrap();
         let query = tree_sitter::Query::new(&q.language, q.calls_query()).unwrap();
         let matches = collect_captures(&query, tree.root_node(), src);
-        // println! is a macro, not a call_expression — just verify query compiled
-        let _ = matches;
+        assert!(!matches.is_empty(), "should match call_expression");
+        let func_idx = query.capture_index_for_name("func").unwrap();
+        let func_text = matches[0].iter()
+            .find(|(i, _)| *i == func_idx)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or("");
+        assert_eq!(func_text, "foo", "expected 'foo' as @func capture");
+    }
+
+    #[test]
+    fn parameters_capture_mut() {
+        let q = queries();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&q.language).unwrap();
+        let src = b"fn f(mut x: i32) {}";
+        let tree = parser.parse(src, None).unwrap();
+        let query = tree_sitter::Query::new(&q.language, q.parameters_query()).unwrap();
+        let matches = collect_captures(&query, tree.root_node(), src);
+        assert!(!matches.is_empty(), "should capture mut parameter");
+        let name_idx = query.capture_index_for_name("name").unwrap();
+        let name = matches[0].iter().find(|(i, _)| *i == name_idx).map(|(_, t)| t.as_str()).unwrap();
+        assert_eq!(name, "x");
     }
 }

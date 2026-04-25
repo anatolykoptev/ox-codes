@@ -78,12 +78,16 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         let modified = apply_edits(&src, edits);
 
         if input.apply {
-            // Atomic write: temp file + rename to avoid partial writes
-            let tmp = path.with_extension("tmp_rw");
-            std::fs::write(&tmp, modified.as_bytes())
-                .map_err(|e| anyhow::anyhow!("rewrite: write tmp {}: {e}", tmp.display()))?;
-            std::fs::rename(&tmp, path)
-                .map_err(|e| anyhow::anyhow!("rewrite: rename {}: {e}", path.display()))?;
+            // Atomic write: NamedTempFile gives unique name + persist() does rename(2).
+            // WalkBuilder(follow_links=false) means we only write files inside root.
+            let dir = path.parent().ok_or_else(|| anyhow::anyhow!("no parent for {}", path.display()))?;
+            let mut tmp = tempfile::NamedTempFile::new_in(dir)
+                .map_err(|e| anyhow::anyhow!("rewrite: create tmp in {}: {e}", dir.display()))?;
+            use std::io::Write as _;
+            tmp.write_all(modified.as_bytes())
+                .map_err(|e| anyhow::anyhow!("rewrite: write tmp: {e}"))?;
+            tmp.persist(path)
+                .map_err(|e| anyhow::anyhow!("rewrite: persist {}: {e}", path.display()))?;
         }
 
         let diff = unified_diff(&rel_path, &src, &modified);
