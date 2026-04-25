@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+/// Controls how matches are expanded to surrounding AST context.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpandMode {
+    /// No expansion — return matched line only (default).
+    #[default]
+    None,
+    /// Expand to enclosing function/method.
+    Function,
+    /// Expand to enclosing block (function, struct, class, impl, etc.).
+    Block,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SearchInput {
     pub root: String,
@@ -18,6 +31,10 @@ pub struct SearchInput {
     pub case_sensitive: bool,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub expand: ExpandMode,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +53,10 @@ pub struct ScopedSearchInput {
     pub file_glob: Option<String>,
     #[serde(default)]
     pub exclude_glob: Option<String>,
+    #[serde(default)]
+    pub expand: ExpandMode,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +70,39 @@ pub struct StructuralSearchInput {
     pub file_glob: Option<String>,
     #[serde(default)]
     pub exclude_glob: Option<String>,
+    #[serde(default)]
+    pub expand: ExpandMode,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RewriteInput {
+    pub root: String,
+    pub pattern: String,
+    pub rewrite: String,
+    pub language: String,
+    #[serde(default = "default_max_results")]
+    pub max_results: usize,
+    #[serde(default)]
+    pub file_glob: Option<String>,
+    #[serde(default)]
+    pub exclude_glob: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RewriteResponse {
+    pub files: Vec<RewriteFileResult>,
+    pub total_matches: usize,
+    pub total_files: usize,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RewriteFileResult {
+    pub file: String,
+    pub matches: usize,
+    pub diff: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +120,36 @@ pub struct SearchMatch {
     pub text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<String>,
+}
+
+/// A match expanded to its surrounding AST context.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExpandedMatch {
+    pub file: String,
+    pub line: usize,
+    pub text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<String>,
+    /// Full text of the enclosing AST node (when expand != None).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expanded: Option<ExpandedBlock>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExpandedBlock {
+    pub symbol_name: String,
+    pub symbol_kind: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub body: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExpandedSearchResponse {
+    pub matches: Vec<ExpandedMatch>,
+    pub total_matches: usize,
+    pub truncated: bool,
+    pub duration_ms: u64,
 }
 
 fn default_context_lines() -> usize { 2 }

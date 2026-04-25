@@ -7,10 +7,10 @@ use ignore::WalkBuilder;
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::grep_filter::build_globset;
-use crate::types::{ScopedSearchInput, SearchMatch, SearchResponse};
+use crate::types::{ExpandedMatch, ExpandedSearchResponse, ExpandMode, ScopedSearchInput};
 use ox_langs::{get_language, get_scope_query, ScopeKind};
 
-pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
+pub fn scoped_search(input: ScopedSearchInput) -> Result<ExpandedSearchResponse> {
     let start = Instant::now();
 
     let scope = parse_scope_kind(&input.scope)?;
@@ -31,7 +31,8 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
     let exclude = input.exclude_glob.as_deref()
         .map(build_globset).transpose()?;
 
-    let mut all_matches = Vec::new();
+    let ts_language = lang_cfg.language.clone();
+    let mut all_matches: Vec<ExpandedMatch> = Vec::new();
     let root = Path::new(&input.root);
 
     for entry in WalkBuilder::new(root)
@@ -47,10 +48,10 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
         }
 
         let rel_path = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include {
-            if !inc.is_match(rel_path) {
-                continue;
-            }
+        if let Some(ref inc) = include
+            && !inc.is_match(rel_path)
+        {
+            continue;
         }
         if let Some(ref exc) = exclude
             && exc.is_match(rel_path)
@@ -64,10 +65,12 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
 
         let file_matches = search_in_scopes(
             &source,
-            &lang_cfg.language,
+            &ts_language,
             &query,
             &matcher,
             &rel_path.to_string_lossy(),
+            &input.expand,
+            input.max_tokens,
         );
         all_matches.extend(file_matches);
 
@@ -82,7 +85,7 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<SearchResponse> {
         all_matches.truncate(input.max_results);
     }
 
-    Ok(SearchResponse {
+    Ok(ExpandedSearchResponse {
         matches: all_matches,
         total_matches: total,
         truncated,
@@ -96,7 +99,9 @@ fn search_in_scopes(
     query: &Query,
     matcher: &grep_regex::RegexMatcher,
     rel_path: &str,
-) -> Vec<SearchMatch> {
+    expand: &ExpandMode,
+    max_tokens: Option<usize>,
+) -> Vec<ExpandedMatch> {
     let mut parser = Parser::new();
     if parser.set_language(language).is_err() {
         return vec![];
@@ -113,19 +118,46 @@ fn search_in_scopes(
     while let Some(qmatch) = query_matches.next() {
         for capture in qmatch.captures {
             let node = capture.node;
+            let scope_byte_start = node.byte_range().start;
             let scope_text = &source[node.byte_range()];
             let scope_start_line = node.start_position().row + 1; // 1-indexed
 
             let scope_str = String::from_utf8_lossy(scope_text);
+            let mut cumulative_bytes: usize = 0;
             for (line_offset, line) in scope_str.lines().enumerate() {
                 if matcher.is_match(line.as_bytes()).unwrap_or(false) {
-                    matches.push(SearchMatch {
+                    let match_byte = scope_byte_start + cumulative_bytes;
+
+                    // Optionally expand to enclosing symbol.
+                    let expanded = if !matches!(expand, ExpandMode::None) {
+                        let block = crate::expand::find_enclosing_symbol(
+                            source,
+                            language,
+                            match_byte,
+                            expand,
+                        );
+                        // If max_tokens is set and block is too large, skip this match.
+                        if let (Some(b), Some(max_tok)) = (&block, max_tokens) {
+                            let estimated_tokens = b.body.len() / 4;
+                            if estimated_tokens > max_tok {
+                                cumulative_bytes += line.len() + 1;
+                                continue;
+                            }
+                        }
+                        block
+                    } else {
+                        None
+                    };
+
+                    matches.push(ExpandedMatch {
                         file: rel_path.to_string(),
                         line: scope_start_line + line_offset,
                         text: line.trim_end().to_string(),
                         context: vec![],
+                        expanded,
                     });
                 }
+                cumulative_bytes += line.len() + 1; // +1 for newline
             }
         }
     }
@@ -149,6 +181,7 @@ fn parse_scope_kind(s: &str) -> Result<ScopeKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ExpandMode;
     use std::fs;
     use tempfile::TempDir;
 
@@ -188,6 +221,8 @@ type Config struct {
             case_sensitive: true,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = scoped_search(input).unwrap();
         // Only TODOs inside function bodies (line 7 comment, line 8 string)
@@ -208,6 +243,8 @@ type Config struct {
             case_sensitive: true,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = scoped_search(input).unwrap();
         // Comments with TODO: line 3, line 7, line 12
@@ -227,6 +264,8 @@ type Config struct {
             case_sensitive: true,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = scoped_search(input).unwrap();
         // Only "hello TODO" string
@@ -246,7 +285,35 @@ type Config struct {
             case_sensitive: true,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         assert!(scoped_search(input).is_err());
+    }
+
+    #[test]
+    fn test_scoped_with_expand() {
+        let dir = setup_go_repo();
+        let input = ScopedSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "TODO".into(),
+            scope: "comments".into(),
+            language: "go".into(),
+            is_regex: false,
+            max_results: 50,
+            case_sensitive: true,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::Function,
+            max_tokens: None,
+        };
+        let result = scoped_search(input).unwrap();
+        // The "TODO inside function" comment at line 7 should expand to main()
+        let expanded_matches: Vec<_> = result.matches.iter()
+            .filter(|m| m.expanded.is_some())
+            .collect();
+        assert!(!expanded_matches.is_empty());
+        let block = expanded_matches[0].expanded.as_ref().unwrap();
+        assert_eq!(block.symbol_name, "main");
     }
 }

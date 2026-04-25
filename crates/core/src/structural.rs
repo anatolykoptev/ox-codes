@@ -10,13 +10,13 @@ use ignore::WalkBuilder;
 use ox_langs::detect_language;
 
 use crate::grep_filter::build_globset;
-use crate::types::{SearchMatch, SearchResponse, StructuralSearchInput};
+use crate::types::{ExpandedMatch, ExpandedSearchResponse, ExpandMode, StructuralSearchInput};
 
 // ── Language wrapper ──────────────────────────────────────────────────────────
 
 /// Wraps a tree-sitter language for use with ast-grep-core.
 #[derive(Clone)]
-struct LangWrapper {
+pub(crate) struct LangWrapper {
     ts_lang: TSLanguage,
     /// Languages that don't accept `$` as identifier start need a different
     /// expando char so that `$VAR` patterns parse correctly.
@@ -93,7 +93,7 @@ impl LanguageExt for LangWrapper {
 /// Returns a LangWrapper for the given (already lower-cased) language name.
 /// `µ` is used as the expando char for languages that don't accept `$` in
 /// identifiers; TypeScript/JS use `$` natively.
-fn lang_wrapper(name: &str) -> Option<LangWrapper> {
+pub(crate) fn lang_wrapper(name: &str) -> Option<LangWrapper> {
     const EXPANDO: char = 'µ';
     match name {
         "go" | "golang" => Some(LangWrapper::new(tree_sitter_go::LANGUAGE.into(), EXPANDO)),
@@ -159,7 +159,7 @@ fn lang_wrapper(name: &str) -> Option<LangWrapper> {
 
 /// Returns the file extension mapped to its canonical language name, or None.
 /// Used to compare against the requested language (including aliases).
-fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
+pub(crate) fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
     let detected = path
         .to_str()
         .and_then(detect_language)
@@ -188,7 +188,7 @@ fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse> {
+pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchResponse> {
     let start = Instant::now();
 
     let lang_name = input.language.to_lowercase();
@@ -207,7 +207,14 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
         .map(build_globset).transpose()?;
 
     let root = Path::new(&input.root);
-    let mut all_matches: Vec<SearchMatch> = Vec::new();
+    let mut all_matches: Vec<ExpandedMatch> = Vec::new();
+
+    // Get tree-sitter language for expand (if needed).
+    let ts_lang = if !matches!(input.expand, ExpandMode::None) {
+        ox_langs::get_language(&lang_name).map(|cfg| cfg.language)
+    } else {
+        None
+    };
 
     let walker = WalkBuilder::new(root)
         .standard_filters(true)
@@ -221,15 +228,15 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
             continue;
         }
         let rel = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include {
-            if !inc.is_match(rel) {
-                continue;
-            }
+        if let Some(ref inc) = include
+            && !inc.is_match(rel)
+        {
+            continue;
         }
-        if let Some(ref exc) = exclude {
-            if exc.is_match(rel) {
-                continue;
-            }
+        if let Some(ref exc) = exclude
+            && exc.is_match(rel)
+        {
+            continue;
         }
 
         let src = match std::fs::read_to_string(path) {
@@ -253,11 +260,36 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
                 Cow::Borrowed(s) => first_line(s),
                 Cow::Owned(ref s) => first_line(s),
             };
-            all_matches.push(SearchMatch {
+
+            // Compute byte offset for expand.
+            let byte_pos = node_match.range().start;
+
+            // Optionally expand to enclosing symbol.
+            let expanded = if let Some(ref lang) = ts_lang {
+                let block = crate::expand::find_enclosing_symbol(
+                    src.as_bytes(),
+                    lang,
+                    byte_pos,
+                    &input.expand,
+                );
+                // If max_tokens is set, skip matches whose expanded body is too large.
+                if let (Some(b), Some(max_tok)) = (&block, input.max_tokens) {
+                    let estimated_tokens = b.body.len() / 4;
+                    if estimated_tokens > max_tok {
+                        continue;
+                    }
+                }
+                block
+            } else {
+                None
+            };
+
+            all_matches.push(ExpandedMatch {
                 file: rel_path.clone(),
                 line,
                 text,
                 context: vec![],
+                expanded,
             });
             if all_matches.len() >= input.max_results {
                 break 'files;
@@ -268,7 +300,7 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<SearchResponse>
     let total_matches = all_matches.len();
     let truncated = total_matches >= input.max_results;
 
-    Ok(SearchResponse {
+    Ok(ExpandedSearchResponse {
         matches: all_matches,
         total_matches,
         truncated,
@@ -285,6 +317,7 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ExpandMode;
     use std::fs;
     use tempfile::TempDir;
 
@@ -315,6 +348,8 @@ func foo() error {
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -339,8 +374,51 @@ func foo() error {
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
         };
         let result = structural_search(input).unwrap();
         assert_eq!(result.matches.len(), 0);
+    }
+
+    #[test]
+    fn test_structural_with_expand_function() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            r#"package main
+
+func handler() error {
+    val, err := db.Query()
+    if err != nil {
+        return err
+    }
+    return nil
+}
+
+func other() {
+    fmt.Println("hello")
+}
+"#,
+        )
+        .unwrap();
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::Function,
+            max_tokens: None,
+        };
+        let result = structural_search(input).unwrap();
+        assert_eq!(result.matches.len(), 1);
+        let m = &result.matches[0];
+        assert!(m.expanded.is_some());
+        let block = m.expanded.as_ref().unwrap();
+        assert_eq!(block.symbol_name, "handler");
+        assert!(block.body.contains("db.Query()"));
+        assert!(block.body.contains("return err"));
     }
 }
