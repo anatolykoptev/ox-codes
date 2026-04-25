@@ -76,6 +76,16 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         total_matches += match_count;
 
         let modified = apply_edits(&src, edits);
+
+        if input.apply {
+            // Atomic write: temp file + rename to avoid partial writes
+            let tmp = path.with_extension("tmp_rw");
+            std::fs::write(&tmp, modified.as_bytes())
+                .map_err(|e| anyhow::anyhow!("rewrite: write tmp {}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, path)
+                .map_err(|e| anyhow::anyhow!("rewrite: rename {}: {e}", path.display()))?;
+        }
+
         let diff = unified_diff(&rel_path, &src, &modified);
 
         files.push(RewriteFileResult {
@@ -137,6 +147,7 @@ mod tests {
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
+            apply: false,
         };
         let result = rewrite(input).unwrap();
         assert_eq!(result.total_matches, 1);
@@ -160,6 +171,7 @@ mod tests {
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
+            apply: false,
         };
         let result = rewrite(input).unwrap();
         assert_eq!(result.total_matches, 2);
@@ -178,6 +190,7 @@ mod tests {
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
+            apply: false,
         };
         let result = rewrite(input).unwrap();
         assert_eq!(result.total_matches, 0);
@@ -204,5 +217,26 @@ mod tests {
         assert!(diff.contains("+++ b/test.go"));
         assert!(diff.contains("-line2"));
         assert!(diff.contains("+changed"));
+    }
+
+    #[test]
+    fn test_rewrite_apply_writes_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.go");
+        fs::write(&file_path, "package main\nfunc f() {\nif err != nil { return err }\n}\n").unwrap();
+        let input = RewriteInput {
+            root: dir.path().to_str().unwrap().to_string(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
+            language: "go".into(),
+            max_results: 10,
+            file_glob: None,
+            exclude_glob: None,
+            apply: true,
+        };
+        let result = rewrite(input).unwrap();
+        assert_eq!(result.total_matches, 1);
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("fmt.Errorf"), "file not updated on disk: {}", content);
     }
 }

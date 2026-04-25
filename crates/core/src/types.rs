@@ -35,6 +35,8 @@ pub struct SearchInput {
     pub expand: ExpandMode,
     #[serde(default)]
     pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub format: Format,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +59,8 @@ pub struct ScopedSearchInput {
     pub expand: ExpandMode,
     #[serde(default)]
     pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub format: Format,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +78,8 @@ pub struct StructuralSearchInput {
     pub expand: ExpandMode,
     #[serde(default)]
     pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub format: Format,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +94,8 @@ pub struct RewriteInput {
     pub file_glob: Option<String>,
     #[serde(default)]
     pub exclude_glob: Option<String>,
+    #[serde(default)]
+    pub apply: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -150,6 +158,15 @@ pub struct ExpandedSearchResponse {
     pub total_matches: usize,
     pub truncated: bool,
     pub duration_ms: u64,
+}
+
+/// Output format for expanded bodies.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    #[default]
+    Plain,
+    Markdown,
 }
 
 fn default_context_lines() -> usize { 2 }
