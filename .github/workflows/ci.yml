@@ -5,20 +5,48 @@ on:
     branches: [master]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   lint:
+    name: lint (fmt + clippy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  test:
+  build:
+    name: build (--locked)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - uses: dtolnay/rust-toolchain@1.93
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked --release
+
+  test:
+    name: test (nextest + doctests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93
+      - uses: taiki-e/install-action@cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo nextest run --workspace --locked
+      - run: cargo test --workspace --locked --doc
+
+  security:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
