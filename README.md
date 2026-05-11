@@ -1,71 +1,100 @@
 # ox-codes
 
-Code search and structural rewrite as an HTTP service. Rust, axum, no MCP.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust 1.93+](https://img.shields.io/badge/rust-1.93%2B-orange.svg)](https://www.rust-lang.org)
+[![Docker ready](https://img.shields.io/badge/docker-ready-2496ED.svg)](Dockerfile)
 
-Wraps three primitives — [ripgrep](https://github.com/BurntSushi/ripgrep), [tree-sitter](https://tree-sitter.github.io), and [ast-grep](https://ast-grep.github.io) — behind one JSON API, plus a small intraprocedural dataflow engine on top.
+Code search and structural rewrite as an HTTP service. Wraps [ripgrep](https://github.com/BurntSushi/ripgrep), [tree-sitter](https://tree-sitter.github.io), and [ast-grep](https://ast-grep.github.io) behind one JSON API, plus an intraprocedural dataflow engine on top.
 
-## What it does
+## Why use it
 
-| Endpoint | Backed by | Use case |
-|---|---|---|
-| `POST /search` | ripgrep | "find every line matching this pattern" |
-| `POST /search/scoped` | tree-sitter + regex | "match only inside function bodies" |
-| `POST /search/structural` | ast-grep | "match by AST shape, e.g. `func $N($$$) error`" |
-| `POST /rewrite` | ast-grep | structural search-and-replace, returns unified diff |
-| `POST /dataflow/analyze` | custom IL/CFG | dead stores, unused variables (Go, Python) |
-| `POST /dataflow/taint` | custom IL/CFG | taint tracking source→sink (Go, Python) |
-| `GET /health` | — | liveness probe |
-
-15 languages parsed for scoped/structural: Go, Python, TypeScript/JavaScript, Rust, Java, C, C++, Ruby, C#, PHP, Svelte, Astro, Bash, Lua. Dataflow currently Go and Python only ([roadmap](docs/ROADMAP.md#-phase-4--dataflow-language-expansion-next)).
+- **Language-aware search** — scope regex matches to function bodies, class blocks, or any named AST region across 15 languages.
+- **Shape-based queries** — match by AST structure (`func $N($$$) error`) instead of text, with wildcard captures.
+- **Structural rewrite** — search-and-replace at the AST level; preview as a unified diff before applying.
+- **Dataflow analysis** — detect dead stores, unused variables, and tainted data flows (source→sink) without spinning up a compiler.
+- **Zero state, zero auth** — stateless HTTP service; mount the directories you want analyzed and call the API.
 
 ## Quick start
 
 ```sh
-make build   # cargo build --workspace
+git clone https://github.com/anatolykoptev/ox-codes
+cd ox-codes
+make build   # cargo build --workspace  (requires Rust 1.93+)
 make test    # cargo test --workspace
-make run     # cargo run -p ox-server -- --port 8902
+make run     # cargo run -p ox-codes -- --port 8902
 ```
 
-Then:
+Then send a search request:
 
 ```sh
-curl -X POST http://127.0.0.1:8902/search \
+curl -s -X POST http://127.0.0.1:8902/search \
   -H 'Content-Type: application/json' \
-  -d '{"root":"/path/to/repo","pattern":"TODO","language":"go"}'
+  -d '{"root":"/path/to/repo","pattern":"TODO","language":"go"}' | jq .
 ```
 
-## Architecture
+Response:
 
-| Crate | Role |
-|---|---|
-| [`crates/core`](crates/core) | search engine: grep + scoped + structural + rewrite + expand |
-| [`crates/langs`](crates/langs) | tree-sitter language scopes (15 languages) |
-| [`crates/dataflow`](crates/dataflow) | IL builder, CFG, def-use chains, taint engine |
-| [`crates/server`](crates/server) | axum HTTP handlers |
-| [`src/`](src) | binary entrypoint (`ox-codes` CLI) |
+```json
+{
+  "matches": [
+    { "file": "cmd/main.go", "line": 42, "text": "// TODO: handle error" }
+  ],
+  "total_matches": 1,
+  "truncated": false,
+  "duration_ms": 8
+}
+```
 
-No persistent state. No authentication. Internal infra — every consumer is privileged.
+## Endpoints
+
+| Endpoint | Engine | Use case |
+|---|---|---|
+| `POST /search` | ripgrep | Grep-like text/regex search across a directory tree |
+| `POST /search/scoped` | tree-sitter + regex | Regex restricted to named AST regions (functions, classes, …) |
+| `POST /search/structural` | ast-grep | Pattern match by AST shape with `$WILDCARD` captures |
+| `POST /rewrite` | ast-grep | Structural search-and-replace; returns unified diff per file |
+| `POST /dataflow/analyze` | custom IL/CFG | Dead stores, unused variables (Go, Python) |
+| `POST /dataflow/taint` | custom IL/CFG | Taint tracking source→sink with built-in or custom rules |
+| `GET /health` | — | Liveness probe |
+
+All search endpoints support `expand` (`"none"` / `"function"` / `"block"`) and `max_tokens` for returning full enclosing AST blocks instead of single matched lines.
 
 ## Documentation
 
-- **[`docs/INTEGRATION.md`](docs/INTEGRATION.md)** — consumer contract: mount conventions, endpoint reference, pitfalls. Read this first if you're wiring a new caller.
-- **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — phase status, what's done and what's next.
-- **[`CLAUDE.md`](CLAUDE.md)** — short orientation for AI agents and humans dropping in cold.
+- **[`docs/API.md`](docs/API.md)** — full request/response schemas with examples for every endpoint.
+- **[`docs/EXAMPLES.md`](docs/EXAMPLES.md)** — end-to-end usage scenarios: auth-function discovery, error-pattern refactor, unused-variable sweep, taint trace.
+- **[`docs/INTEGRATION.md`](docs/INTEGRATION.md)** — consumer contract: filesystem mount conventions, path pitfalls, Docker volume wiring.
+- **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — phase status; what is done and what is next.
+- **[`docs/architecture/`](docs/architecture/)** — LikeC4 architecture diagrams.
 
-## Deploy (krolik server)
+## Languages supported
 
-```sh
-cd ~/deploy/krolik-server
-docker compose build --no-cache ox-codes \
-  && docker compose up -d --no-deps --force-recreate ox-codes
-```
+Scoped and structural search: Go, Python, TypeScript, JavaScript, Rust, Java, C, C++, Ruby, C#, PHP, Svelte, Astro, Bash, Lua.
 
-Auto-deploy is wired through dozor on push to `master`. Smoke probe at `http://127.0.0.1:8904/health` (host) → `http://ox-codes:8902/health` (container).
+Dataflow (analyze + taint): Go, Python. Additional languages tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## Versions
+## Crate layout
 
-Workspace `0.1.0`, Rust 2024 edition. See `Cargo.toml`.
+| Crate | Role |
+|---|---|
+| [`crates/core`](crates/core) | Search engine: grep, scoped, structural, rewrite, expand |
+| [`crates/langs`](crates/langs) | Tree-sitter language scopes (15 languages) |
+| [`crates/dataflow`](crates/dataflow) | IL builder, CFG, def-use chains, taint engine |
+| [`crates/server`](crates/server) | axum HTTP handlers |
+| [`src/`](src) | Binary entrypoint (`ox-codes` CLI) |
+
+## Acknowledgements
+
+Built on top of excellent open-source work:
+
+- [ripgrep](https://github.com/BurntSushi/ripgrep) — fast regex search across file trees
+- [tree-sitter](https://tree-sitter.github.io) — incremental, error-tolerant parsing for 15+ languages
+- [ast-grep](https://ast-grep.github.io) — AST pattern matching and rewriting
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-Internal project. Not published.
+MIT — see [LICENSE](LICENSE).
