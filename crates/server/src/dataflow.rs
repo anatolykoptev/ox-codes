@@ -24,7 +24,7 @@ pub async fn handle(
         .await
         .map_err(|_| {
             (
-                StatusCode::REQUEST_TIMEOUT,
+                StatusCode::GATEWAY_TIMEOUT,
                 "dataflow analysis exceeded time limit".to_string(),
             )
         })?
@@ -55,6 +55,7 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut files_analyzed: usize = 0;
 
+    let mut files_truncated = false;
     for entry in WalkBuilder::new(root)
         .standard_filters(true)
         .build()
@@ -65,6 +66,7 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
         if let Some(cap) = input.max_files
             && files_analyzed >= cap
         {
+            files_truncated = true;
             break;
         }
 
@@ -117,6 +119,7 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
         total_findings: total,
         files_analyzed,
         truncated,
+        files_truncated,
         duration_ms: start.elapsed().as_millis() as u64,
     })
 }
@@ -148,12 +151,12 @@ mod tests {
         };
 
         let result = analyze_directory(input).unwrap();
-        // files_analyzed must not exceed cap (may be less due to extension filter).
-        assert!(
-            result.files_analyzed <= 3,
-            "expected <=3 files, got {}",
+        assert_eq!(
+            result.files_analyzed, 3,
+            "expected exactly 3 files, got {}",
             result.files_analyzed
         );
+        assert!(result.files_truncated, "files_truncated should be true when cap is hit");
     }
 
     /// Verifies that max_files=None disables the cap (all files walked).
@@ -176,5 +179,36 @@ mod tests {
 
         let result = analyze_directory(input).unwrap();
         assert_eq!(result.files_analyzed, 5);
+    }
+
+    /// Verifies that .svelte files are NOT silently skipped — files_analyzed >= 1.
+    #[test]
+    fn test_analyze_svelte_not_skipped() {
+        let dir = tempdir().unwrap();
+        let svelte_src = br#"<script lang="ts">
+function leaks() {
+    let x = secret();
+    return x;
+}
+</script>
+<div>{x}</div>"#;
+        let path = dir.path().join("component.svelte");
+        std::fs::write(&path, svelte_src).unwrap();
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "svelte".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let result = analyze_directory(input).unwrap();
+        assert!(
+            result.files_analyzed >= 1,
+            "svelte file should not be skipped; files_analyzed={}",
+            result.files_analyzed
+        );
     }
 }

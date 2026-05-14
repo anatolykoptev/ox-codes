@@ -45,7 +45,7 @@ pub fn get_queries(name: &str) -> Option<Box<dyn LangQueries>> {
     match name {
         "go" | "golang" => Some(Box::new(go::GoQueries::new())),
         "python" | "py" => Some(Box::new(python::PythonQueries::new())),
-        "typescript" | "ts" | "javascript" | "js" => Some(Box::new(typescript::TypescriptQueries::new())),
+        "typescript" | "ts" | "javascript" | "js" | "svelte" => Some(Box::new(typescript::TypescriptQueries::new())),
         "rust" | "rs" => Some(Box::new(rust_lang::RustQueries::new())),
         _ => None,
     }

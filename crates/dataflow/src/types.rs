@@ -135,6 +135,9 @@ pub struct DataflowResponse {
     pub total_findings: usize,
     pub files_analyzed: usize,
     pub truncated: bool,
+    /// True when the walk was cut short by `max_files`. Callers should
+    /// treat the result as a sample, not an exhaustive analysis.
+    pub files_truncated: bool,
     pub duration_ms: u64,
 }
 
