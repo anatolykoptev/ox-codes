@@ -1,11 +1,11 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 /// Unique variable ID (Semgrep sid pattern — resolves shadowing).
 pub type Sid = u32;
 
 /// Text range in source.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct Span {
     pub start_byte: usize,
     pub end_byte: usize,
@@ -76,7 +76,7 @@ pub struct ScopeChain {
 }
 
 /// Finding severity.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
@@ -85,7 +85,7 @@ pub enum Severity {
 }
 
 /// Finding kind.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     DeadStore,
@@ -97,7 +97,7 @@ pub enum FindingKind {
 }
 
 /// A data-flow finding.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Finding {
     pub kind: FindingKind,
     pub severity: Severity,
@@ -129,7 +129,7 @@ pub struct DataflowInput {
 }
 
 /// Response from dataflow analysis.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct DataflowResponse {
     pub findings: Vec<Finding>,
     pub total_findings: usize,
@@ -137,6 +137,7 @@ pub struct DataflowResponse {
     pub truncated: bool,
     /// True when the walk was cut short by `max_files`. Callers should
     /// treat the result as a sample, not an exhaustive analysis.
+    #[serde(default)]
     pub files_truncated: bool,
     pub duration_ms: u64,
 }
