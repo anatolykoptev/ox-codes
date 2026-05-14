@@ -96,7 +96,7 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
     }
 
     // Rank by match density (stable sort, most matches first)
-    per_file.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    per_file.sort_by_key(|a| std::cmp::Reverse(a.1.len()));
 
     // Expand matches if requested: group by file, read once, parse once
     let do_expand = !matches!(input.expand, ExpandMode::None);

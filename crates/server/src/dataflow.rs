@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::Json;
@@ -10,11 +10,24 @@ use ox_core::grep_filter::build_globset;
 use ox_dataflow::{DataflowInput, DataflowResponse, Finding, analysis, scope_walker};
 use ox_langs::get_language;
 
+/// Hard deadline for a single dataflow request. Note: `spawn_blocking` cannot
+/// be cancelled — the task continues running in the blocking thread pool after
+/// the timeout fires, but the HTTP response is returned immediately.
+const DATAFLOW_TIMEOUT_SECS: u64 = 25;
+
 pub async fn handle(
     Json(input): Json<DataflowInput>,
 ) -> Result<Json<DataflowResponse>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(move || analyze_directory(input))
+    let task = tokio::task::spawn_blocking(move || analyze_directory(input));
+
+    let result = tokio::time::timeout(Duration::from_secs(DATAFLOW_TIMEOUT_SECS), task)
         .await
+        .map_err(|_| {
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                "dataflow analysis exceeded time limit".to_string(),
+            )
+        })?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
@@ -48,6 +61,13 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
     {
+        // File cap: stop walking once limit is reached.
+        if let Some(cap) = input.max_files
+            && files_analyzed >= cap
+        {
+            break;
+        }
+
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if !lang_cfg.extensions.contains(&ext) {
@@ -99,4 +119,62 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
         truncated,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ox_dataflow::DataflowInput;
+    use tempfile::tempdir;
+
+    /// Verifies that analyze_directory stops at max_files even when the
+    /// directory contains more matching files.
+    #[test]
+    fn test_analyze_directory_respects_max_files() {
+        let dir = tempdir().unwrap();
+        // Create 10 .ts files.
+        for i in 0..10 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: Some(3),
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let result = analyze_directory(input).unwrap();
+        // files_analyzed must not exceed cap (may be less due to extension filter).
+        assert!(
+            result.files_analyzed <= 3,
+            "expected <=3 files, got {}",
+            result.files_analyzed
+        );
+    }
+
+    /// Verifies that max_files=None disables the cap (all files walked).
+    #[test]
+    fn test_analyze_directory_no_cap() {
+        let dir = tempdir().unwrap();
+        for i in 0..5 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let result = analyze_directory(input).unwrap();
+        assert_eq!(result.files_analyzed, 5);
+    }
 }

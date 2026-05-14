@@ -107,6 +107,11 @@ pub struct Finding {
     pub variable: String,
 }
 
+/// Cap on files walked per request. Prevents multi-minute walks on large repos
+/// when the language has few or no findings (early-exit by findings count alone
+/// is ineffective in that case).
+pub const DEFAULT_MAX_FILES: usize = 2000;
+
 /// Request for dataflow analysis.
 #[derive(Debug, serde::Deserialize)]
 pub struct DataflowInput {
@@ -114,6 +119,9 @@ pub struct DataflowInput {
     pub language: String,
     #[serde(default = "default_max_results")]
     pub max_results: usize,
+    /// Hard cap on files walked. Defaults to [`DEFAULT_MAX_FILES`].
+    #[serde(default = "default_max_files")]
+    pub max_files: Option<usize>,
     #[serde(default)]
     pub file_glob: Option<String>,
     #[serde(default)]
@@ -132,6 +140,10 @@ pub struct DataflowResponse {
 
 fn default_max_results() -> usize {
     100
+}
+
+fn default_max_files() -> Option<usize> {
+    Some(DEFAULT_MAX_FILES)
 }
 
 #[cfg(test)]
@@ -175,5 +187,32 @@ mod tests {
             is_param: false,
         };
         assert!(binding.is_read());
+    }
+
+    #[test]
+    fn default_max_files_is_2000() {
+        let input: DataflowInput = serde_json::from_str(
+            r#"{"root":"/tmp","language":"typescript"}"#,
+        )
+        .unwrap();
+        assert_eq!(input.max_files, Some(DEFAULT_MAX_FILES));
+    }
+
+    #[test]
+    fn max_files_can_be_overridden() {
+        let input: DataflowInput = serde_json::from_str(
+            r#"{"root":"/tmp","language":"typescript","max_files":50}"#,
+        )
+        .unwrap();
+        assert_eq!(input.max_files, Some(50));
+    }
+
+    #[test]
+    fn max_files_can_be_disabled() {
+        let input: DataflowInput = serde_json::from_str(
+            r#"{"root":"/tmp","language":"typescript","max_files":null}"#,
+        )
+        .unwrap();
+        assert_eq!(input.max_files, None);
     }
 }

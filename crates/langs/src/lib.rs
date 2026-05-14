@@ -10,6 +10,7 @@ mod php;
 mod python;
 mod ruby;
 mod rust_lang;
+mod svelte;
 mod swift;
 mod typescript;
 mod zig;
@@ -39,6 +40,7 @@ pub fn get_language(name: &str) -> Option<LangConfig> {
         "rust" | "rs" => Some(rust_lang::config()),
         "python" | "py" => Some(python::config()),
         "typescript" | "ts" | "javascript" | "js" => Some(typescript::config()),
+        "svelte" => Some(svelte::config()),
         "java" => Some(java::config()),
         "c" => Some(c::config()),
         "cpp" | "c++" | "cxx" => Some(cpp::config()),
@@ -61,6 +63,7 @@ pub fn get_scope_query(name: &str, scope: ScopeKind) -> Option<&'static str> {
         "rust" | "rs" => Some(rust_lang::scope_query(scope)),
         "python" | "py" => Some(python::scope_query(scope)),
         "typescript" | "ts" | "javascript" | "js" => Some(typescript::scope_query(scope)),
+        "svelte" => Some(svelte::scope_query(scope)),
         "java" => Some(java::scope_query(scope)),
         "c" => Some(c::scope_query(scope)),
         "cpp" | "c++" | "cxx" => Some(cpp::scope_query(scope)),
@@ -84,6 +87,7 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "rs" => Some("rust"),
         "py" => Some("python"),
         "ts" | "tsx" | "js" | "jsx" => Some("typescript"),
+        "svelte" => Some("svelte"),
         "java" => Some("java"),
         "c" | "h" => Some("c"),
         "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some("cpp"),
@@ -104,7 +108,7 @@ mod tests {
     use super::*;
 
     const ALL_LANGS: &[&str] = &[
-        "go", "rust", "python", "typescript", "java", "c", "cpp", "ruby", "csharp",
+        "go", "rust", "python", "typescript", "svelte", "java", "c", "cpp", "ruby", "csharp",
         "php", "bash", "lua", "swift", "kotlin", "zig",
     ];
 
@@ -146,6 +150,24 @@ mod tests {
         assert!(get_language("kt").is_some());
         assert!(get_language("zig").is_some());
         assert!(get_language("cobol").is_none());
+    }
+
+    #[test]
+    fn test_get_language_svelte() {
+        let cfg = get_language("svelte").unwrap();
+        assert_eq!(cfg.extensions, &["svelte"]);
+    }
+
+    #[test]
+    fn test_get_scope_query_svelte() {
+        assert!(get_scope_query("svelte", ScopeKind::Imports).is_some());
+        assert!(get_scope_query("svelte", ScopeKind::FunctionBodies).is_some());
+    }
+
+    #[test]
+    fn test_detect_language_svelte() {
+        assert_eq!(detect_language("App.svelte"), Some("svelte"));
+        assert_eq!(detect_language("+page.svelte"), Some("svelte"));
     }
 
     #[test]
