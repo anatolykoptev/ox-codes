@@ -150,11 +150,10 @@ fn walk_node(
                 if !cursor.goto_next_sibling() { break; }
             }
         }
-        if push.is_some() {
-            if let Some(s) = stack.pop() {
+        if push.is_some()
+            && let Some(s) = stack.pop() {
                 ctx.finished.push(s);
             }
-        }
         return;
     }
 
@@ -232,8 +231,8 @@ fn walk_svelte_attribute(
     }
 
     // If it's a directive that carries an expression, secondary-parse each.
-    if let Some(name) = &attr_name {
-        if let Some(directive) = svelte_refs::parse_directive(name) {
+    if let Some(name) = &attr_name
+        && let Some(directive) = svelte_refs::parse_directive(name) {
             use svelte_refs::DirectiveKind;
             match directive.kind {
                 DirectiveKind::EventHandler
@@ -260,7 +259,6 @@ fn walk_svelte_attribute(
             }
             return;
         }
-    }
     // Plain attribute: walk expressions for completeness.
     for expr in &expressions {
         walk_svelte_expression(*expr, src, q, stack, ctx);
@@ -272,12 +270,11 @@ fn walk_svelte_block_condition(
     node: Node, field: &str, src: &[u8], q: &CompiledQueries,
     stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
 ) {
-    if let Some(cond) = node.child_by_field_name(field) {
-        if cond.kind() == "svelte_raw_text" {
+    if let Some(cond) = node.child_by_field_name(field)
+        && cond.kind() == "svelte_raw_text" {
             let raw = &src[cond.byte_range()];
             walk_as_typescript(raw, q, stack, ctx);
         }
-    }
 }
 
 /// Walk `each_start` node: process the iterable expression (identifier field)
@@ -287,15 +284,14 @@ fn walk_svelte_each_start(
     stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
 ) {
     // identifier field: the expression being iterated (e.g. `items`)
-    if let Some(id_node) = node.child_by_field_name("identifier") {
-        if id_node.kind() == "svelte_raw_text" {
+    if let Some(id_node) = node.child_by_field_name("identifier")
+        && id_node.kind() == "svelte_raw_text" {
             let raw = &src[id_node.byte_range()];
             walk_as_typescript(raw, q, stack, ctx);
         }
-    }
     // parameter field: the binding name (e.g. `item`) — declare, don't reference
-    if let Some(param_node) = node.child_by_field_name("parameter") {
-        if param_node.kind() == "svelte_raw_text" {
+    if let Some(param_node) = node.child_by_field_name("parameter")
+        && param_node.kind() == "svelte_raw_text" {
             let name = text_of(param_node, src).trim().to_string();
             if !name.is_empty() {
                 ctx.sid += 1;
@@ -304,7 +300,6 @@ fn walk_svelte_each_start(
                 }
             }
         }
-    }
 }
 
 /// Walk all `svelte_raw_text` children of a node as TypeScript expressions.
@@ -378,7 +373,7 @@ fn is_func_decl_node(kind: &str) -> bool {
 /// Bind a named function declaration's identifier to the PARENT scope
 /// (the scope that was active BEFORE the Function scope was pushed).
 /// This makes  visible as  at module/block level.
-fn bind_func_name(node: Node, src: &[u8], stack: &mut Vec<Scope>, sid: &mut u32) {
+fn bind_func_name(node: Node, src: &[u8], stack: &mut [Scope], sid: &mut u32) {
     // The function name is the first  child of function_declaration.
     let mut cursor = node.walk();
     if !cursor.goto_first_child() { return; }

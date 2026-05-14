@@ -6,10 +6,14 @@ pub struct SvelteQueries {
     lang: Language,
 }
 
-impl SvelteQueries {
-    pub fn new() -> Self {
+impl Default for SvelteQueries {
+    fn default() -> Self {
         Self { lang: tree_sitter_svelte_next::LANGUAGE.into() }
     }
+}
+
+impl SvelteQueries {
+    pub fn new() -> Self { Self::default() }
 }
 
 impl LangQueries for SvelteQueries {
