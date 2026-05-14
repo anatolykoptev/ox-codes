@@ -11,6 +11,7 @@ mod python;
 mod ruby;
 mod rust_lang;
 mod svelte;
+pub mod preproc;
 mod swift;
 mod typescript;
 mod zig;

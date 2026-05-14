@@ -3,6 +3,7 @@ use tree_sitter::Language;
 pub mod go;
 pub mod python;
 pub mod rust_lang;
+pub mod svelte;
 pub mod typescript;
 #[cfg(test)]
 mod test_util;
@@ -45,7 +46,8 @@ pub fn get_queries(name: &str) -> Option<Box<dyn LangQueries>> {
     match name {
         "go" | "golang" => Some(Box::new(go::GoQueries::new())),
         "python" | "py" => Some(Box::new(python::PythonQueries::new())),
-        "typescript" | "ts" | "javascript" | "js" | "svelte" => Some(Box::new(typescript::TypescriptQueries::new())),
+        "typescript" | "ts" | "javascript" | "js" => Some(Box::new(typescript::TypescriptQueries::new())),
+        "svelte" => Some(Box::new(svelte::SvelteQueries::new())),
         "rust" | "rs" => Some(Box::new(rust_lang::RustQueries::new())),
         _ => None,
     }
