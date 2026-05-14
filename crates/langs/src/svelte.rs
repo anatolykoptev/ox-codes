@@ -11,6 +11,18 @@ pub fn config() -> LangConfig {
 pub fn scope_query(scope: ScopeKind) -> &'static str {
     // Delegate to TypeScript queries — tree-sitter-typescript parses
     // the <script> block content inside .svelte files correctly.
+    //
+    // IMPORTANT: tree-sitter-typescript has NO visibility into Svelte-specific
+    // syntax. The following constructs are invisible to these queries and will
+    // be silently ignored:
+    //   - Template expressions: {#if}, {#each}, {#await}, {:else}, {/if}, etc.
+    //   - Event directives:     on:click={handler}, on:input={...}
+    //   - Reactive statements:  $: derived = expr  (Svelte's $: label)
+    //   - Slot props:           let:item, <slot let:foo={bar}>
+    //
+    // To add proper Svelte grammar support, replace tree-sitter-typescript with
+    // the tree-sitter-svelte grammar (https://github.com/Himujjal/tree-sitter-svelte)
+    // and extend the queries below to cover the above node types.
     match scope {
         ScopeKind::FunctionBodies => {
             "(function_declaration body: (statement_block) @scope) \
