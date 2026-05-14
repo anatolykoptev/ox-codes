@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 ox-langs = { path = "../langs" }
 tree-sitter = "0.26"
+tree-sitter-svelte-next = "0.1.1"
+tree-sitter-typescript = "0.23"
 smallvec = { version = "1", features = ["serde"] }
 fixedbitset = "0.5"
 petgraph = "0.7"
