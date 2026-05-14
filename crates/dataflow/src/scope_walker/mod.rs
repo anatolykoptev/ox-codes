@@ -34,8 +34,21 @@ pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
         }
     };
 
-    let mut ctx = WalkCtx { sid: 0, finished: Vec::new(), is_svelte, is_ts_secondary: false };
-    let mut stack = vec![make_scope(ScopeKind::Module, tree.root_node())];
+    // Build a reusable TS parser for secondary parses (avoids per-expression alloc).
+    let mut ts_parser = Parser::new();
+    let ts_lang_for_reuse: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    // Ignore error — if this fails, walk_as_typescript will handle gracefully.
+    let _ = ts_parser.set_language(&ts_lang_for_reuse);
+
+    let mut ctx = WalkCtx {
+        sid: 0,
+        finished: Vec::new(),
+        is_svelte,
+        is_ts_secondary: false,
+        ts_parser,
+        span_offset: 0,
+    };
+    let mut stack = vec![make_scope(ScopeKind::Module, tree.root_node(), 0)];
     walk_node(tree.root_node(), source, &compiled, &mut stack, &mut ctx);
     while let Some(s) = stack.pop() {
         ctx.finished.push(s);
@@ -57,29 +70,43 @@ fn build_ts_queries(ts_lang: &tree_sitter::Language) -> Result<CompiledQueries> 
 
 /// Secondary-parse a UTF-8 slice as TypeScript and walk it, recording
 /// references and bindings into the current scope stack.
+///
+/// `offset` is the byte position of `raw` within the original source file.
+/// All spans produced during this walk are shifted by `offset` so they refer
+/// to the original file coordinates, not to the sub-slice.
 fn walk_as_typescript(
     raw: &[u8],
+    offset: usize,
     q: &CompiledQueries,
     stack: &mut Vec<Scope>,
     ctx: &mut WalkCtx,
 ) {
-    let ts_lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-    let mut parser = Parser::new();
-    if parser.set_language(&ts_lang).is_err() {
-        return;
-    }
-    let Some(tree) = parser.parse(raw, None) else { return };
+    // Reuse the parser stored in ctx — no per-call alloc.
+    let Some(tree) = ctx.ts_parser.parse(raw, None) else { return };
     // Walk the secondary tree; mark as non-svelte so we use compiled TS queries.
     let saved_svelte = ctx.is_svelte;
+    let saved_offset = ctx.span_offset;
     ctx.is_svelte = false;
     ctx.is_ts_secondary = true;
+    ctx.span_offset = offset;
     walk_node(tree.root_node(), raw, q, stack, ctx);
     ctx.is_svelte = saved_svelte;
     ctx.is_ts_secondary = false;
+    ctx.span_offset = saved_offset;
 }
 
 struct CompiledQueries { decl: Query, assign: Query, param: Query }
-struct WalkCtx { sid: u32, finished: Vec<Scope>, is_svelte: bool, is_ts_secondary: bool }
+struct WalkCtx {
+    sid: u32,
+    finished: Vec<Scope>,
+    is_svelte: bool,
+    is_ts_secondary: bool,
+    /// Reusable TypeScript parser (avoids Parser::new() per expression node).
+    ts_parser: Parser,
+    /// Byte offset to add to all spans during a secondary-parse walk.
+    /// Equals child.start_byte() in the original Svelte source.
+    span_offset: usize,
+}
 
 fn walk_node(
     node: Node, src: &[u8], q: &CompiledQueries,
@@ -128,20 +155,20 @@ fn walk_node(
         // --- Non-Svelte (or secondary-parse TS) handling ---
         let push = scope_kind_for(kind);
         if let Some(sk) = push {
-            stack.push(make_scope(sk, node));
+            stack.push(make_scope(sk, node, ctx.span_offset));
             if sk == ScopeKind::Function {
-                collect_params(node, src, &q.param, stack, &mut ctx.sid);
+                collect_params(node, src, &q.param, stack, &mut ctx.sid, ctx.span_offset);
             }
         }
         if is_decl_node(kind) {
-            collect_bindings(node, src, &q.decl, stack, &mut ctx.sid, false);
+            collect_bindings(node, src, &q.decl, stack, &mut ctx.sid, false, ctx.span_offset);
         } else if is_assign_node(kind) {
-            collect_bindings(node, src, &q.assign, stack, &mut ctx.sid, false);
+            collect_bindings(node, src, &q.assign, stack, &mut ctx.sid, false, ctx.span_offset);
         } else if ctx.is_ts_secondary && is_func_decl_node(kind) {
             // Bind the function name to the enclosing scope (not the function's own scope).
-            bind_func_name(node, src, stack, &mut ctx.sid);
+            bind_func_name(node, src, stack, &mut ctx.sid, ctx.span_offset);
         } else if node.child_count() == 0 && kind == "identifier" {
-            record_reference(node, src, stack);
+            record_reference(node, src, stack, ctx.span_offset);
         }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -180,7 +207,8 @@ fn walk_svelte_script(
         let child = cursor.node();
         if child.kind() == "raw_text" {
             let raw = &src[child.byte_range()];
-            walk_as_typescript(raw, q, stack, ctx);
+            let offset = child.start_byte();
+            walk_as_typescript(raw, offset, q, stack, ctx);
         }
         if !cursor.goto_next_sibling() { break; }
     }
@@ -197,7 +225,8 @@ fn walk_svelte_expression(
         let child = cursor.node();
         if child.kind() == "svelte_raw_text" {
             let raw = &src[child.byte_range()];
-            walk_as_typescript(raw, q, stack, ctx);
+            let offset = child.start_byte();
+            walk_as_typescript(raw, offset, q, stack, ctx);
         }
         if !cursor.goto_next_sibling() { break; }
     }
@@ -273,7 +302,8 @@ fn walk_svelte_block_condition(
     if let Some(cond) = node.child_by_field_name(field)
         && cond.kind() == "svelte_raw_text" {
             let raw = &src[cond.byte_range()];
-            walk_as_typescript(raw, q, stack, ctx);
+            let offset = cond.start_byte();
+            walk_as_typescript(raw, offset, q, stack, ctx);
         }
 }
 
@@ -287,7 +317,8 @@ fn walk_svelte_each_start(
     if let Some(id_node) = node.child_by_field_name("identifier")
         && id_node.kind() == "svelte_raw_text" {
             let raw = &src[id_node.byte_range()];
-            walk_as_typescript(raw, q, stack, ctx);
+            let offset = id_node.start_byte();
+            walk_as_typescript(raw, offset, q, stack, ctx);
         }
     // parameter field: the binding name (e.g. `item`) — declare, don't reference
     if let Some(param_node) = node.child_by_field_name("parameter")
@@ -296,7 +327,7 @@ fn walk_svelte_each_start(
             if !name.is_empty() {
                 ctx.sid += 1;
                 if let Some(scope) = stack.last_mut() {
-                    scope.vars.push(new_binding(name, ctx.sid, param_node, None, true));
+                    scope.vars.push(new_binding(name, ctx.sid, param_node, None, true, 0));
                 }
             }
         }
@@ -313,7 +344,8 @@ fn walk_svelte_raw_text_children(
         let child = cursor.node();
         if child.kind() == "svelte_raw_text" {
             let raw = &src[child.byte_range()];
-            walk_as_typescript(raw, q, stack, ctx);
+            let offset = child.start_byte();
+            walk_as_typescript(raw, offset, q, stack, ctx);
         }
         if !cursor.goto_next_sibling() { break; }
     }
@@ -321,7 +353,7 @@ fn walk_svelte_raw_text_children(
 
 /// Synthesize a zero-span reference from a plain name string.
 fn record_name_as_reference(name: &str, node: Node, _src: &[u8], stack: &mut [Scope]) {
-    let span = node_span(node);
+    let span = node_span(node, 0);
     for scope in stack.iter_mut().rev() {
         if let Some(b) = scope.vars.iter_mut().rev().find(|v| v.name == name) {
             if b.def_site.start_byte != span.start_byte {
@@ -373,7 +405,7 @@ fn is_func_decl_node(kind: &str) -> bool {
 /// Bind a named function declaration's identifier to the PARENT scope
 /// (the scope that was active BEFORE the Function scope was pushed).
 /// This makes  visible as  at module/block level.
-fn bind_func_name(node: Node, src: &[u8], stack: &mut [Scope], sid: &mut u32) {
+fn bind_func_name(node: Node, src: &[u8], stack: &mut [Scope], sid: &mut u32, offset: usize) {
     // The function name is the first  child of function_declaration.
     let mut cursor = node.walk();
     if !cursor.goto_first_child() { return; }
@@ -385,34 +417,36 @@ fn bind_func_name(node: Node, src: &[u8], stack: &mut [Scope], sid: &mut u32) {
             // Bind to the scope that encloses the function (second-to-last on stack,
             // since the Function scope was already pushed above us).
             let target_idx = if stack.len() >= 2 { stack.len() - 2 } else { 0 };
-            stack[target_idx].vars.push(new_binding(name, *sid, child, None, false));
+            stack[target_idx].vars.push(new_binding(name, *sid, child, None, false, offset));
             return;
         }
         if !cursor.goto_next_sibling() { break; }
     }
 }
 
-fn make_scope(kind: ScopeKind, node: Node) -> Scope {
-    let sp = node_span(node);
+fn make_scope(kind: ScopeKind, node: Node, offset: usize) -> Scope {
+    let sp = node_span(node, offset);
     Scope { kind, vars: Vec::new(), span: sp }
 }
 
-fn node_span(node: Node) -> Span {
+fn node_span(node: Node, offset: usize) -> Span {
     Span {
-        start_byte: node.start_byte(), end_byte: node.end_byte(),
-        start_line: node.start_position().row + 1, end_line: node.end_position().row + 1,
+        start_byte: node.start_byte() + offset,
+        end_byte: node.end_byte() + offset,
+        start_line: node.start_position().row + 1,
+        end_line: node.end_position().row + 1,
     }
 }
 
-fn new_binding(name: String, sid: u32, node: Node, val: Option<ConstValue>, param: bool) -> VarBinding {
+fn new_binding(name: String, sid: u32, node: Node, val: Option<ConstValue>, param: bool, offset: usize) -> VarBinding {
     VarBinding {
-        name, sid, def_site: node_span(node), def_value: val,
+        name, sid, def_site: node_span(node, offset), def_value: val,
         taint_tags: SmallVec::new(), uses: Vec::new(), is_param: param,
     }
 }
 
 fn collect_params(
-    node: Node, src: &[u8], query: &Query, stack: &mut [Scope], sid: &mut u32,
+    node: Node, src: &[u8], query: &Query, stack: &mut [Scope], sid: &mut u32, offset: usize,
 ) {
     let Some(ni) = query.capture_index_for_name("name") else { return };
     let mut qc = QueryCursor::new();
@@ -421,7 +455,7 @@ fn collect_params(
         for cap in m.captures.iter().filter(|c| c.index == ni) {
             *sid += 1;
             if let Some(scope) = stack.last_mut() {
-                scope.vars.push(new_binding(text_of(cap.node, src), *sid, cap.node, None, true));
+                scope.vars.push(new_binding(text_of(cap.node, src), *sid, cap.node, None, true, offset));
             }
         }
     }
@@ -429,7 +463,7 @@ fn collect_params(
 
 fn collect_bindings(
     node: Node, src: &[u8], query: &Query,
-    stack: &mut [Scope], sid: &mut u32, param: bool,
+    stack: &mut [Scope], sid: &mut u32, param: bool, offset: usize,
 ) {
     let Some(ni) = query.capture_index_for_name("name") else { return };
     let vi = query.capture_index_for_name("value");
@@ -441,14 +475,14 @@ fn collect_bindings(
             .and_then(|vc| try_const(vc.node, src));
         *sid += 1;
         if let Some(scope) = stack.last_mut() {
-            scope.vars.push(new_binding(text_of(nc.node, src), *sid, nc.node, val, param));
+            scope.vars.push(new_binding(text_of(nc.node, src), *sid, nc.node, val, param, offset));
         }
     }
 }
 
-fn record_reference(node: Node, src: &[u8], stack: &mut [Scope]) {
+fn record_reference(node: Node, src: &[u8], stack: &mut [Scope], offset: usize) {
     let name = text_of(node, src);
-    let span = node_span(node);
+    let span = node_span(node, offset);
     for scope in stack.iter_mut().rev() {
         if let Some(b) = scope.vars.iter_mut().rev().find(|v| v.name == name) {
             if b.def_site.start_byte != span.start_byte {
