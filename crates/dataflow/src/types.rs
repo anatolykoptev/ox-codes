@@ -116,7 +116,8 @@ pub const DEFAULT_MAX_FILES: usize = 2000;
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct DataflowInput {
     pub root: String,
-    pub language: String,
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default = "default_max_results")]
     pub max_results: usize,
     /// Hard cap on files walked. Defaults to [`DEFAULT_MAX_FILES`].

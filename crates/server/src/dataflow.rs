@@ -233,8 +233,14 @@ fn compute_fingerprint(
 fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
     let start = Instant::now();
 
-    let lang_cfg = get_language(&input.language)
-        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
+    let language = input
+        .language
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("language is required for dataflow analysis"))?;
+
+    let lang_cfg = get_language(language)
+        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", language))?;
 
     let include = input.file_glob.as_deref().map(build_globset).transpose()?;
     let exclude = input
@@ -260,7 +266,7 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
             Err(_) => continue,
         };
 
-        let chain = match scope_walker::walk_file(&source, &input.language) {
+        let chain = match scope_walker::walk_file(&source, language) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -311,7 +317,7 @@ mod tests {
 
         let input = DataflowInput {
             root: dir.path().to_string_lossy().into_owned(),
-            language: "typescript".to_string(),
+            language: Some("typescript".to_string()),
             max_results: 100,
             max_files: Some(3),
             file_glob: None,
@@ -342,7 +348,7 @@ mod tests {
 
         let input = DataflowInput {
             root: dir.path().to_string_lossy().into_owned(),
-            language: "typescript".to_string(),
+            language: Some("typescript".to_string()),
             max_results: 100,
             max_files: None,
             file_glob: None,
@@ -370,7 +376,7 @@ function leaks() {
 
         let input = DataflowInput {
             root: dir.path().to_string_lossy().into_owned(),
-            language: "svelte".to_string(),
+            language: Some("svelte".to_string()),
             max_results: 100,
             max_files: None,
             file_glob: None,
@@ -636,7 +642,7 @@ mod semaphore_tests {
                 let cache = DataflowCache::new();
                 let input = DataflowInput {
                     root: r,
-                    language: "typescript".to_string(),
+                    language: Some("typescript".to_string()),
                     max_results: 100,
                     max_files: Some(10_000),
                     file_glob: None,

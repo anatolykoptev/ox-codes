@@ -204,10 +204,15 @@ fn build_pattern_for_go(query: &str, wrapper: &LangWrapper) -> Result<Pattern> {
 pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchResponse> {
     let start = Instant::now();
 
-    let lang_name = input.language.to_lowercase();
+    let lang_name = input
+        .language
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("language is required for structural search"))?
+        .to_lowercase();
     let wrapper = match lang_wrapper(&lang_name) {
         Some(w) => w,
-        None => bail!("unsupported language: {}", input.language),
+        None => bail!("unsupported language: {}", lang_name),
     };
 
     // Pre-compile the pattern once; fail fast on invalid patterns.
@@ -301,7 +306,7 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchR
                     }
                 }
                 block.map(|blk| crate::types::ExpandedBlock {
-                    body: crate::expand::wrap_body(blk.body, input.format, Some(&input.language)),
+                    body: crate::expand::wrap_body(blk.body, input.format, input.language.as_deref()),
                     ..blk
                 })
             } else {
@@ -368,7 +373,7 @@ func foo() error {
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "if $ERR != nil { return $ERR }".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
@@ -395,7 +400,7 @@ func foo() error {
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "if $X != nil { return $X }".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
@@ -431,7 +436,7 @@ func other() {
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "if $ERR != nil { return $ERR }".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
@@ -466,7 +471,7 @@ func other() {
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "$RECV.BulkCopyInsert($$$)".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 5,
             file_glob: None,
             exclude_glob: None,
@@ -493,7 +498,7 @@ func other() {
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "$RECV.BulkInsert($$$)".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 5,
             file_glob: None,
             exclude_glob: None,
@@ -521,7 +526,7 @@ func other() {
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "foo($$$)".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 5,
             file_glob: None,
             exclude_glob: None,
@@ -548,7 +553,7 @@ func other() {
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "$RECV.Close()".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 5,
             file_glob: None,
             exclude_glob: None,
@@ -577,7 +582,7 @@ func other() {
         let input = StructuralSearchInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "$RECV.Insert($X, $$$)".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 5,
             file_glob: None,
             exclude_glob: None,
