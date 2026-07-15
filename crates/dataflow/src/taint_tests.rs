@@ -275,3 +275,50 @@ fn taint_tsx_sink_not_dropped() {
     assert_eq!(findings[0].rule_id, "xss");
     assert_eq!(findings[0].sink.function, "sink");
 }
+
+/// Re-review (#55): a destructuring declaration (`const {token} = getSource()`)
+/// must be handled FAIL-SAFE. `visit_var_decl` skips a non-identifier
+/// declarator `name` (object_pattern / array_pattern) rather than coining a
+/// decoy variable literally named "{token}" that poisons the name table. The
+/// consequence is that destructuring taint is not (yet) tracked — a
+/// pre-existing false negative, tracked as a follow-up — but the skip must be
+/// CLEAN: no decoy binding, no panic, and no spurious finding. This test locks
+/// that: a finding here would mean the decoy leaked (a false positive).
+#[test]
+fn taint_destructuring_declarator_fail_safe() {
+    use crate::taint::{TaintSink, TaintSource};
+    use crate::taint_rules::TaintRule;
+
+    let src = br#"function App() {
+    const {token} = getSource();
+    sink(token);
+}
+"#;
+    let rules = vec![TaintRule {
+        id: "xss".into(),
+        sources: vec![TaintSource {
+            pattern: "getSource".into(),
+            tag: "user_input".into(),
+        }],
+        sinks: vec![TaintSink {
+            pattern: "sink".into(),
+            arg_index: 0,
+            cwe: "CWE-79".into(),
+            description: "XSS".into(),
+        }],
+        sanitizers: vec![],
+        severity: "error".into(),
+    }];
+
+    let il = build_il(src, "typescript").unwrap();
+    let mut findings = Vec::new();
+    for func in &il.functions {
+        let cfg = build_cfg(func);
+        findings.extend(analyze_taint(&cfg, &rules, "app.ts"));
+    }
+    assert!(
+        findings.is_empty(),
+        "destructuring taint is not tracked yet (fail-safe skip); a finding here \
+         would mean a decoy binding leaked: {findings:?}"
+    );
+}

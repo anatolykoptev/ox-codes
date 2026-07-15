@@ -120,7 +120,11 @@ pub fn get_scope_query(name: &str, scope: ScopeKind) -> Option<&'static str> {
 /// unchanged.
 pub fn effective_language_id(lang_name: &str, file_ext: &str) -> Option<&'static str> {
     let id = language_id(lang_name)?;
-    if id == "typescript" && matches!(file_ext, "tsx" | "jsx") {
+    // Case-insensitive extension match: a `.TSX`/`.JSX` file must still select
+    // the JSX-aware grammar (re-review #55 — a case-sensitive match let
+    // uppercase extensions fall back to the non-JSX grammar, re-triggering #44).
+    let ext = file_ext.to_ascii_lowercase();
+    if id == "typescript" && matches!(ext.as_str(), "tsx" | "jsx") {
         Some("tsx")
     } else {
         Some(id)
@@ -246,6 +250,9 @@ mod tests {
         assert_eq!(effective_language_id("ts", "tsx"), Some("tsx"));
         assert_eq!(effective_language_id("javascript", "jsx"), Some("tsx"));
         assert_eq!(effective_language_id("js", "tsx"), Some("tsx"));
+        // case-insensitive extension (re-review #55): uppercase .TSX/.JSX
+        assert_eq!(effective_language_id("typescript", "TSX"), Some("tsx"));
+        assert_eq!(effective_language_id("typescript", "JSX"), Some("tsx"));
         // ts-family lang + ts/js ext → "typescript"
         assert_eq!(
             effective_language_id("typescript", "ts"),

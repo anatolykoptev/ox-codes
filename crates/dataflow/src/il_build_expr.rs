@@ -45,6 +45,16 @@ impl<'a> IlBuilder<'a> {
             let Some(name_node) = name_node else {
                 continue;
             };
+            // Only bind a plain identifier name. A destructuring declarator
+            // (object_pattern `const {a,b}=…` / array_pattern `const [a]=…`)
+            // is NOT an identifier: node_text would coin a bogus variable like
+            // "{ a, b }" that no reference matches, silently dropping the taint
+            // flow (re-review #55). Skipping restores the pre-fix behavior for
+            // destructuring (unhandled, not mis-handled); full destructuring
+            // taint is a separate follow-up.
+            if name_node.kind() != "identifier" {
+                continue;
+            }
             let ident = self.node_text(name_node).to_string();
             let sid = self.next_sid();
             self.name_table.insert(ident.clone(), sid);

@@ -99,9 +99,13 @@ pub fn scoped_search(
         let per_file_lang = effective_language_id(&input.language, ext)
             .and_then(|id| get_language(id).map(|c| c.language))
             .unwrap_or_else(|| lang_cfg.language.clone());
-        let query = Query::new(&per_file_lang, query_str)?;
         let lang = per_file_lang.clone();
         let (cached, _is_hit) = cache.get_or_insert(key, move || {
+            // Compile the scope query lazily INSIDE the closure so it runs only
+            // on a cache MISS — building it per-file before this point
+            // recompiled the tree-sitter Query even on cache HITs, defeating
+            // the point of ScopeCache (re-review #55).
+            let query = Query::new(&lang, query_str)?;
             let source = std::fs::read(&canonical)?;
             let scopes = ScopeCache::parse_scopes(source, &query, &lang)?;
             Ok(Arc::new(scopes))
