@@ -146,11 +146,6 @@ impl Iterator for FilteredWalk<'_> {
     type Item = (PathBuf, String, std::fs::Metadata);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.max_files.is_some_and(|cap| self.count >= cap) {
-            self.truncated = true;
-            return None;
-        }
-
         for result in self.walk.by_ref() {
             let entry = result.ok()?;
             if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -179,6 +174,17 @@ impl Iterator for FilteredWalk<'_> {
                 Ok(m) => m,
                 Err(_) => continue,
             };
+
+            // Cap check AFTER pulling a qualifying item, not before. This
+            // distinguishes "walk naturally exhausted at exactly cap" (not
+            // truncated) from "a qualifying file existed beyond position cap"
+            // (truncated). Checking at the top would set truncated=true even
+            // when nothing was skipped (e.g. a repo with exactly max_files
+            // qualifying files).
+            if self.max_files.is_some_and(|cap| self.count >= cap) {
+                self.truncated = true;
+                return None;
+            }
 
             self.count += 1;
             let rel_str = rel_path.to_string_lossy().into_owned();
@@ -283,8 +289,11 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
             break;
         }
     }
-    let files_truncated =
-        walk.truncated() || input.max_files.is_some_and(|cap| files_analyzed >= cap);
+    // `walk.truncated()` is the sole source of truth: it is true iff a
+    // qualifying file existed beyond position cap (checked after pulling, not
+    // before). The old `|| files_analyzed >= cap` disjunct fired at exact-cap
+    // even when nothing was skipped — removed.
+    let files_truncated = walk.truncated();
 
     let total = all_findings.len();
     let truncated = total > input.max_results;
@@ -339,6 +348,42 @@ mod tests {
         assert!(
             result.files_truncated,
             "files_truncated should be true when cap is hit"
+        );
+    }
+
+    /// Verifies that a directory with EXACTLY `max_files` qualifying files is NOT
+    /// falsely flagged as truncated. `files_truncated` must mean "a qualifying
+    /// file existed BEYOND position cap", not "count == cap".
+    /// Reverting the cap check to the top of `FilteredWalk::next` (or restoring
+    /// the `files_analyzed >= cap` OR-disjunct) REDS this test.
+    #[test]
+    fn test_analyze_directory_exact_cap_boundary() {
+        let dir = tempdir().unwrap();
+        // Create exactly 3 .ts files — the cap is also 3.
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: Some(3),
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
+        assert_eq!(
+            result.files_analyzed, 3,
+            "all 3 files should be analyzed"
+        );
+        assert!(
+            !result.files_truncated,
+            "files_truncated must be false when the walk naturally exhausted at exactly the cap \
+             (no qualifying file was skipped)"
         );
     }
 
