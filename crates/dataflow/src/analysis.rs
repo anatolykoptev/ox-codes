@@ -12,10 +12,7 @@ pub fn dead_stores(chain: &ScopeChain, file: &str) -> Vec<Finding> {
                 findings.push(Finding {
                     kind: FindingKind::DeadStore,
                     severity: Severity::Warning,
-                    message: format!(
-                        "variable `{}` is assigned a value but never read",
-                        var.name
-                    ),
+                    message: format!("variable `{}` is assigned a value but never read", var.name),
                     file: file.to_string(),
                     span: var.def_site,
                     variable: var.name.clone(),
@@ -56,10 +53,7 @@ pub fn const_values(chain: &ScopeChain, file: &str) -> Vec<Finding> {
                 findings.push(Finding {
                     kind: FindingKind::ConstantValue,
                     severity: Severity::Info,
-                    message: format!(
-                        "variable `{}` has constant value: {:?}",
-                        var.name, val
-                    ),
+                    message: format!("variable `{}` has constant value: {:?}", var.name, val),
                     file: file.to_string(),
                     span: var.def_site,
                     variable: var.name.clone(),
@@ -141,8 +135,7 @@ mod tests {
         let all = analyze(&chain, "test.go");
         assert!(
             !all.iter().any(|f| f.variable == "_"
-                && (f.kind == FindingKind::DeadStore
-                    || f.kind == FindingKind::UnusedVariable)),
+                && (f.kind == FindingKind::DeadStore || f.kind == FindingKind::UnusedVariable)),
             "_ should be skipped, got: {all:?}"
         );
     }
@@ -153,8 +146,8 @@ mod tests {
         let chain = walk_file(src, "go").unwrap();
         let cv = const_values(&chain, "test.go");
         assert!(
-            cv.iter().any(|f| f.variable == "x"
-                && f.kind == FindingKind::ConstantValue),
+            cv.iter()
+                .any(|f| f.variable == "x" && f.kind == FindingKind::ConstantValue),
             "expected const value for x, got: {cv:?}"
         );
     }
@@ -165,11 +158,11 @@ mod tests {
         let chain = walk_file(src, "go").unwrap();
         let all = analyze(&chain, "test.go");
         // x should appear as DeadStore (has value) but NOT also as UnusedVariable.
-        let x_findings: Vec<_> = all.iter()
-            .filter(|f| f.variable == "x")
-            .collect();
+        let x_findings: Vec<_> = all.iter().filter(|f| f.variable == "x").collect();
         let has_dead = x_findings.iter().any(|f| f.kind == FindingKind::DeadStore);
-        let has_unused = x_findings.iter().any(|f| f.kind == FindingKind::UnusedVariable);
+        let has_unused = x_findings
+            .iter()
+            .any(|f| f.kind == FindingKind::UnusedVariable);
         assert!(has_dead, "expected DeadStore for x");
         assert!(!has_unused, "DeadStore should subsume UnusedVariable");
     }

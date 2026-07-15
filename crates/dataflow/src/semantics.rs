@@ -126,10 +126,7 @@ fn python_semantics() -> Vec<FlowSemantic> {
 pub fn lookup<'a>(semantics: &'a [FlowSemantic], func_name: &str) -> Option<&'a FlowSemantic> {
     semantics.iter().find(|s| {
         func_name == s.method
-            || func_name.ends_with(&format!(
-                ".{}",
-                s.method.rsplit('.').next().unwrap_or("")
-            ))
+            || func_name.ends_with(&format!(".{}", s.method.rsplit('.').next().unwrap_or("")))
     })
 }
 

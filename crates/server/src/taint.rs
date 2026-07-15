@@ -61,11 +61,7 @@ fn analyze(input: TaintInput) -> Result<TaintResponse> {
     let lang_cfg = get_language(&input.language)
         .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
 
-    let include = input
-        .file_glob
-        .as_deref()
-        .map(build_globset)
-        .transpose()?;
+    let include = input.file_glob.as_deref().map(build_globset).transpose()?;
     let exclude = input
         .exclude_glob
         .as_deref()

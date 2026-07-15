@@ -25,8 +25,7 @@ impl<'a> IlBuilder<'a> {
                 let val = text.parse::<f64>().unwrap_or(0.0);
                 Expr::Const(Const::Float(val))
             }
-            "interpreted_string_literal" | "raw_string_literal"
-            | "string" | "string_literal" => {
+            "interpreted_string_literal" | "raw_string_literal" | "string" | "string_literal" => {
                 Expr::Const(Const::Str(self.node_text(node).to_string()))
             }
             "true" | "True" => Expr::Const(Const::Bool(true)),

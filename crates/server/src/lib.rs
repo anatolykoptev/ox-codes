@@ -5,7 +5,10 @@ mod search;
 mod structural;
 mod taint;
 
-use axum::{Router, routing::{get, post}};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 pub fn router() -> Router {
     Router::new()

@@ -15,7 +15,9 @@ impl Default for GoQueries {
 }
 
 impl GoQueries {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl LangQueries for GoQueries {
@@ -107,8 +109,7 @@ mod tests {
     #[test]
     fn calls_query_compiles() {
         let q = queries();
-        tree_sitter::Query::new(&q.language, q.calls_query())
-            .expect("calls query should compile");
+        tree_sitter::Query::new(&q.language, q.calls_query()).expect("calls query should compile");
     }
 
     #[test]
@@ -119,8 +120,7 @@ mod tests {
 
         let src = b"package main\nfunc f() { x := 42 }";
         let tree = parser.parse(src, None).unwrap();
-        let query =
-            tree_sitter::Query::new(&q.language, q.declarations_query()).unwrap();
+        let query = tree_sitter::Query::new(&q.language, q.declarations_query()).unwrap();
         let matches = collect_captures(&query, tree.root_node(), src);
 
         assert!(!matches.is_empty(), "should match short_var_declaration");
@@ -141,8 +141,7 @@ mod tests {
 
         let src = b"package main\nfunc f() { var x int; x = 10 }";
         let tree = parser.parse(src, None).unwrap();
-        let query =
-            tree_sitter::Query::new(&q.language, q.assignments_query()).unwrap();
+        let query = tree_sitter::Query::new(&q.language, q.assignments_query()).unwrap();
         let matches = collect_captures(&query, tree.root_node(), src);
         assert!(!matches.is_empty(), "should match assignment_statement");
     }
@@ -155,8 +154,7 @@ mod tests {
 
         let src = b"package main\nfunc f(x int, y string) {}";
         let tree = parser.parse(src, None).unwrap();
-        let query =
-            tree_sitter::Query::new(&q.language, q.parameters_query()).unwrap();
+        let query = tree_sitter::Query::new(&q.language, q.parameters_query()).unwrap();
         let matches = collect_captures(&query, tree.root_node(), src);
         assert_eq!(matches.len(), 2, "should match two parameters");
     }
@@ -169,8 +167,7 @@ mod tests {
 
         let src = b"package main\nfunc f() { fmt.Println(\"hello\") }";
         let tree = parser.parse(src, None).unwrap();
-        let query =
-            tree_sitter::Query::new(&q.language, q.calls_query()).unwrap();
+        let query = tree_sitter::Query::new(&q.language, q.calls_query()).unwrap();
         let matches = collect_captures(&query, tree.root_node(), src);
 
         assert!(!matches.is_empty(), "should match call_expression");

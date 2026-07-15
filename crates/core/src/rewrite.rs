@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
+use ast_grep_core::AstGrep;
 use ast_grep_core::matcher::Pattern;
 use ast_grep_core::tree_sitter::StrDoc;
-use ast_grep_core::AstGrep;
 use ignore::WalkBuilder;
 
 use crate::grep_filter::build_globset;
@@ -24,7 +24,11 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         .map_err(|e| anyhow::anyhow!("invalid pattern '{}': {e}", input.pattern))?;
 
     let include = input.file_glob.as_deref().map(build_globset).transpose()?;
-    let exclude = input.exclude_glob.as_deref().map(build_globset).transpose()?;
+    let exclude = input
+        .exclude_glob
+        .as_deref()
+        .map(build_globset)
+        .transpose()?;
 
     let root = Path::new(&input.root);
     let mut files: Vec<RewriteFileResult> = Vec::new();
@@ -80,7 +84,9 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         if input.apply {
             // Atomic write: NamedTempFile gives unique name + persist() does rename(2).
             // WalkBuilder(follow_links=false) means we only write files inside root.
-            let dir = path.parent().ok_or_else(|| anyhow::anyhow!("no parent for {}", path.display()))?;
+            let dir = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("no parent for {}", path.display()))?;
             let mut tmp = tempfile::NamedTempFile::new_in(dir)
                 .map_err(|e| anyhow::anyhow!("rewrite: create tmp in {}: {e}", dir.display()))?;
             use std::io::Write as _;
@@ -185,7 +191,11 @@ mod tests {
     #[test]
     fn test_rewrite_no_match() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc main() {}\n",
+        )
+        .unwrap();
         let input = RewriteInput {
             root: dir.path().to_string_lossy().into(),
             pattern: "if $X != nil { return $X }".into(),
@@ -204,10 +214,7 @@ mod tests {
     #[test]
     fn test_apply_edits_reverse_order() {
         let src = "aaa bbb ccc";
-        let edits = vec![
-            (0, 3, "YYY".to_string()),
-            (4, 3, "XXX".to_string()),
-        ];
+        let edits = vec![(0, 3, "YYY".to_string()), (4, 3, "XXX".to_string())];
         let result = apply_edits(src, edits);
         assert_eq!(result, "YYY XXX ccc");
     }
@@ -227,7 +234,11 @@ mod tests {
     fn test_rewrite_apply_writes_file() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("main.go");
-        fs::write(&file_path, "package main\nfunc f() {\nif err != nil { return err }\n}\n").unwrap();
+        fs::write(
+            &file_path,
+            "package main\nfunc f() {\nif err != nil { return err }\n}\n",
+        )
+        .unwrap();
         let input = RewriteInput {
             root: dir.path().to_str().unwrap().to_string(),
             pattern: "if $ERR != nil { return $ERR }".into(),
@@ -241,6 +252,10 @@ mod tests {
         let result = rewrite(input).unwrap();
         assert_eq!(result.total_matches, 1);
         let content = fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains("fmt.Errorf"), "file not updated on disk: {}", content);
+        assert!(
+            content.contains("fmt.Errorf"),
+            "file not updated on disk: {}",
+            content
+        );
     }
 }

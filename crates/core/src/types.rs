@@ -169,6 +169,12 @@ pub enum Format {
     Markdown,
 }
 
-fn default_context_lines() -> usize { 2 }
-fn default_max_results() -> usize { 50 }
-fn default_true() -> bool { true }
+fn default_context_lines() -> usize {
+    2
+}
+fn default_max_results() -> usize {
+    50
+}
+fn default_true() -> bool {
+    true
+}

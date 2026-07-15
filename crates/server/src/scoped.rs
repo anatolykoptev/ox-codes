@@ -1,7 +1,7 @@
 use axum::Json;
 use axum::http::StatusCode;
-use ox_core::{ExpandedSearchResponse, ScopedSearchInput};
 use ox_core::scoped;
+use ox_core::{ExpandedSearchResponse, ScopedSearchInput};
 
 pub async fn handle(
     Json(input): Json<ScopedSearchInput>,

@@ -9,9 +9,7 @@ pub fn config() -> LangConfig {
 
 pub fn scope_query(scope: ScopeKind) -> &'static str {
     match scope {
-        ScopeKind::FunctionBodies => {
-            "(function_definition body: (compound_statement) @scope)"
-        }
+        ScopeKind::FunctionBodies => "(function_definition body: (compound_statement) @scope)",
         ScopeKind::Comments => "(comment) @scope",
         ScopeKind::Strings => "(string_literal) @scope",
         ScopeKind::TypeDefinitions => {

@@ -1,14 +1,14 @@
-use std::path::Path;
-use std::time::Instant;
 use anyhow::Result;
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
 use ignore::WalkBuilder;
+use std::path::Path;
+use std::time::Instant;
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::grep_filter::build_globset;
-use crate::types::{ExpandedMatch, ExpandedSearchResponse, ExpandMode, ScopedSearchInput};
-use ox_langs::{get_language, get_scope_query, ScopeKind};
+use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, ScopedSearchInput};
+use ox_langs::{ScopeKind, get_language, get_scope_query};
 
 pub fn scoped_search(input: ScopedSearchInput) -> Result<ExpandedSearchResponse> {
     let start = Instant::now();
@@ -26,10 +26,12 @@ pub fn scoped_search(input: ScopedSearchInput) -> Result<ExpandedSearchResponse>
 
     let query = Query::new(&lang_cfg.language, query_str)?;
 
-    let include = input.file_glob.as_deref()
-        .map(build_globset).transpose()?;
-    let exclude = input.exclude_glob.as_deref()
-        .map(build_globset).transpose()?;
+    let include = input.file_glob.as_deref().map(build_globset).transpose()?;
+    let exclude = input
+        .exclude_glob
+        .as_deref()
+        .map(build_globset)
+        .transpose()?;
 
     let ts_language = lang_cfg.language.clone();
     let mut all_matches: Vec<ExpandedMatch> = Vec::new();
@@ -136,10 +138,7 @@ fn search_in_scopes(
                     // Optionally expand to enclosing symbol.
                     let expanded = if !matches!(expand, ExpandMode::None) {
                         let block = crate::expand::find_enclosing_symbol(
-                            source,
-                            language,
-                            match_byte,
-                            expand,
+                            source, language, match_byte, expand,
                         );
                         // If max_tokens is set and block is too large, skip this match.
                         if let (Some(b), Some(max_tok)) = (&block, max_tokens) {
@@ -235,7 +234,7 @@ type Config struct {
         };
         let result = scoped_search(input).unwrap();
         // Only TODOs inside function bodies (line 7 comment, line 8 string)
-        assert!(result.matches.len() >= 1);
+        assert!(!result.matches.is_empty());
         assert!(result.matches.iter().all(|m| m.line >= 6)); // inside main()
     }
 
@@ -322,7 +321,9 @@ type Config struct {
         };
         let result = scoped_search(input).unwrap();
         // The "TODO inside function" comment at line 7 should expand to main()
-        let expanded_matches: Vec<_> = result.matches.iter()
+        let expanded_matches: Vec<_> = result
+            .matches
+            .iter()
             .filter(|m| m.expanded.is_some())
             .collect();
         assert!(!expanded_matches.is_empty());

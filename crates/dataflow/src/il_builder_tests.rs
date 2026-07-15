@@ -23,9 +23,15 @@ func foo() {
         assert_eq!(f.name, "foo");
 
         // x := 1
-        assert!(has_instr(&f.body, |i| matches!(i, Instr::Assign { lval, rval: Expr::Const(Const::Int(1)), .. } if lval.name().map(|n| n.ident.as_str()) == Some("x"))));
+        assert!(has_instr(
+            &f.body,
+            |i| matches!(i, Instr::Assign { lval, rval: Expr::Const(Const::Int(1)), .. } if lval.name().map(|n| n.ident.as_str()) == Some("x"))
+        ));
         // y := x + 2
-        assert!(has_instr(&f.body, |i| matches!(i, Instr::Assign { lval, rval: Expr::BinOp { .. }, .. } if lval.name().map(|n| n.ident.as_str()) == Some("y"))));
+        assert!(has_instr(
+            &f.body,
+            |i| matches!(i, Instr::Assign { lval, rval: Expr::BinOp { .. }, .. } if lval.name().map(|n| n.ident.as_str()) == Some("y"))
+        ));
         // fmt.Println(y)
         assert!(has_instr(&f.body, |i| matches!(i, Instr::Call { .. })));
     }
@@ -73,7 +79,10 @@ func foo() {
         assert_eq!(il.functions.len(), 1);
         let f = &il.functions[0];
         assert_eq!(f.name, "foo");
-        assert!(has_instr(&f.body, |i| matches!(i, Instr::Return { value: Some(_), .. })));
+        assert!(has_instr(&f.body, |i| matches!(
+            i,
+            Instr::Return { value: Some(_), .. }
+        )));
     }
 
     #[test]
@@ -84,7 +93,10 @@ func foo() {
 }"#;
         let il = build_il(src, "go").unwrap();
         let f = &il.functions[0];
-        assert!(has_instr(&f.body, |i| matches!(i, Instr::Fixme { reason, .. } if reason == "go_statement")));
+        assert!(has_instr(
+            &f.body,
+            |i| matches!(i, Instr::Fixme { reason, .. } if reason == "go_statement")
+        ));
     }
 
     #[test]
@@ -105,5 +117,4 @@ func bar() { y := 2 }
         let result = build_il(b"code", "brainfuck");
         assert!(result.is_err());
     }
-
 }

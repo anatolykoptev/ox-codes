@@ -33,10 +33,8 @@ pub fn solve_forward(cfg: &Cfg, problem: &dyn DataFlowProblem) -> DataFlowResult
     let n = cfg.graph.node_count();
     let bits = problem.universe_size();
 
-    let mut out_sets: Vec<FixedBitSet> =
-        (0..n).map(|_| FixedBitSet::with_capacity(bits)).collect();
-    let mut in_sets: Vec<FixedBitSet> =
-        (0..n).map(|_| FixedBitSet::with_capacity(bits)).collect();
+    let mut out_sets: Vec<FixedBitSet> = (0..n).map(|_| FixedBitSet::with_capacity(bits)).collect();
+    let mut in_sets: Vec<FixedBitSet> = (0..n).map(|_| FixedBitSet::with_capacity(bits)).collect();
 
     let rpo = cfg.reverse_postorder();
 

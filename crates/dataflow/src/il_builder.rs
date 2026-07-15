@@ -181,8 +181,8 @@ impl<'a> IlBuilder<'a> {
                 }
             }
             "call" | "call_expression" => self.visit_call_stmt(node),
-            "go_statement" | "defer_statement" | "select_statement"
-            | "try_statement" | "with_statement" => {
+            "go_statement" | "defer_statement" | "select_statement" | "try_statement"
+            | "with_statement" => {
                 self.current_body.push(Instr::Fixme {
                     reason: node.kind().to_string(),
                     span: self.span_of(node),

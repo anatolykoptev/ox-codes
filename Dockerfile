@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.4
 
 # Stage 1: Chef
-FROM rust:1.93-bookworm AS chef
+FROM rust:1.97-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends clang mold curl && rm -rf /var/lib/apt/lists/*
 # sccache: content-addressed compiler cache — hits survive BuildKit cache
 # invalidation on source changes; mold replaces gold linker (3-5x faster link).

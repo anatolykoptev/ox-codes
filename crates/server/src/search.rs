@@ -1,7 +1,7 @@
 use axum::Json;
 use axum::http::StatusCode;
-use ox_core::{ExpandedSearchResponse, SearchInput};
 use ox_core::grep;
+use ox_core::{ExpandedSearchResponse, SearchInput};
 
 pub async fn handle(
     Json(input): Json<SearchInput>,

@@ -15,7 +15,9 @@ impl Default for PythonQueries {
 }
 
 impl PythonQueries {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl LangQueries for PythonQueries {
@@ -118,8 +120,7 @@ mod tests {
     #[test]
     fn calls_query_compiles() {
         let q = queries();
-        tree_sitter::Query::new(&q.language, q.calls_query())
-            .expect("calls query should compile");
+        tree_sitter::Query::new(&q.language, q.calls_query()).expect("calls query should compile");
     }
 
     #[test]
@@ -130,8 +131,7 @@ mod tests {
 
         let src = b"x = 42\ny = \"hello\"";
         let tree = parser.parse(src, None).unwrap();
-        let query =
-            tree_sitter::Query::new(&q.language, q.declarations_query()).unwrap();
+        let query = tree_sitter::Query::new(&q.language, q.declarations_query()).unwrap();
         let matches = collect_captures(&query, tree.root_node(), src);
 
         assert_eq!(matches.len(), 2, "should match two assignments");
@@ -152,8 +152,7 @@ mod tests {
 
         let src = b"def f(x: int, y=\"default\"):\n    pass";
         let tree = parser.parse(src, None).unwrap();
-        let query =
-            tree_sitter::Query::new(&q.language, q.parameters_query()).unwrap();
+        let query = tree_sitter::Query::new(&q.language, q.parameters_query()).unwrap();
         let matches = collect_captures(&query, tree.root_node(), src);
 
         assert!(
@@ -171,8 +170,7 @@ mod tests {
 
         let src = b"print(\"hello\")\nos.path.join(a, b)";
         let tree = parser.parse(src, None).unwrap();
-        let query =
-            tree_sitter::Query::new(&q.language, q.calls_query()).unwrap();
+        let query = tree_sitter::Query::new(&q.language, q.calls_query()).unwrap();
         let matches = collect_captures(&query, tree.root_node(), src);
         assert_eq!(matches.len(), 2, "should match two calls");
     }

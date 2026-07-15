@@ -64,11 +64,7 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
     let lang_cfg = get_language(&input.language)
         .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
 
-    let include = input
-        .file_glob
-        .as_deref()
-        .map(build_globset)
-        .transpose()?;
+    let include = input.file_glob.as_deref().map(build_globset).transpose()?;
     let exclude = input
         .exclude_glob
         .as_deref()
@@ -180,7 +176,10 @@ mod tests {
             "expected exactly 3 files, got {}",
             result.files_analyzed
         );
-        assert!(result.files_truncated, "files_truncated should be true when cap is hit");
+        assert!(
+            result.files_truncated,
+            "files_truncated should be true when cap is hit"
+        );
     }
 
     /// Verifies that max_files=None disables the cap (all files walked).
@@ -236,7 +235,6 @@ function leaks() {
         );
     }
 }
-
 
 #[cfg(test)]
 mod semaphore_tests {

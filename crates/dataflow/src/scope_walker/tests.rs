@@ -8,8 +8,14 @@ fn go_basic_uses() {
     let y = find_var(&chain, "y");
     assert!(x.is_some(), "x should be found");
     assert!(y.is_some(), "y should be found");
-    assert!(!x.unwrap().uses.is_empty(), "x should have uses (read by y := x + 2)");
-    assert!(!y.unwrap().uses.is_empty(), "y should have uses (read by _ = y)");
+    assert!(
+        !x.unwrap().uses.is_empty(),
+        "x should have uses (read by y := x + 2)"
+    );
+    assert!(
+        !y.unwrap().uses.is_empty(),
+        "y should have uses (read by _ = y)"
+    );
 }
 
 #[test]
@@ -17,11 +23,17 @@ fn go_reassignment() {
     let src = b"package main\nfunc foo() { x := 1; x = 2; _ = x }";
     let chain = walk_file(src, "go").unwrap();
     // x should have two bindings (declaration + assignment).
-    let xs: Vec<_> = chain.scopes.iter()
+    let xs: Vec<_> = chain
+        .scopes
+        .iter()
         .flat_map(|s| s.vars.iter())
         .filter(|v| v.name == "x")
         .collect();
-    assert!(xs.len() >= 2, "x should have at least 2 bindings, got {}", xs.len());
+    assert!(
+        xs.len() >= 2,
+        "x should have at least 2 bindings, got {}",
+        xs.len()
+    );
     // Last binding (x=2) should be read.
     let last = xs.last().unwrap();
     assert!(!last.uses.is_empty(), "last x binding should be read");
@@ -97,7 +109,10 @@ fn svelte_span_offsets_are_relative_to_file() {
 
     // Declaration span.
     let fn_binding = find_var(&chain, "fn");
-    assert!(fn_binding.is_some(), "fn binding must be found in svelte script");
+    assert!(
+        fn_binding.is_some(),
+        "fn binding must be found in svelte script"
+    );
     let binding = fn_binding.unwrap();
     assert_eq!(
         binding.def_site.start_byte, decl_offset,
@@ -149,7 +164,11 @@ fn svelte_parser_reused_across_expressions() {
         src.push_str(&format!("<span>{{x + {i}}}</span>"));
     }
     let result = walk_file(src.as_bytes(), "svelte");
-    assert!(result.is_ok(), "walk_file must not panic with many expressions: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "walk_file must not panic with many expressions: {:?}",
+        result.err()
+    );
     let chain = result.unwrap();
     let x = find_var(&chain, "x");
     assert!(x.is_some(), "x declared in script must be found");
@@ -164,7 +183,9 @@ fn find_var<'a>(
     chain: &'a crate::types::ScopeChain,
     name: &str,
 ) -> Option<&'a crate::types::VarBinding> {
-    chain.scopes.iter()
+    chain
+        .scopes
+        .iter()
         .flat_map(|s| s.vars.iter())
         .find(|v| v.name == name)
 }

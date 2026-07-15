@@ -33,23 +33,30 @@ fn default_python_rules_exist() {
 
 #[test]
 fn no_findings_for_clean_code() {
-    let findings = analyze_go(br#"package main
+    let findings = analyze_go(
+        br#"package main
 func foo() {
     x := 1
     y := x + 2
     _ = y
-}"#);
-    assert!(findings.is_empty(), "clean code should have no taint findings");
+}"#,
+    );
+    assert!(
+        findings.is_empty(),
+        "clean code should have no taint findings"
+    );
 }
 
 #[test]
 fn no_findings_without_sources() {
     // Code with sink-like calls but no source patterns
-    let findings = analyze_go(br#"package main
+    let findings = analyze_go(
+        br#"package main
 func foo() {
     query := "SELECT 1"
     db.Exec(query)
-}"#);
+}"#,
+    );
     // "SELECT 1" is a literal, not from a source — no taint
     assert!(findings.is_empty(), "no source = no taint finding");
 }
@@ -64,7 +71,12 @@ fn taint_propagation_through_assignment() {
     use crate::types::Span;
     use smallvec::SmallVec;
 
-    let span = Span { start_byte: 0, end_byte: 10, start_line: 1, end_line: 1 };
+    let span = Span {
+        start_byte: 0,
+        end_byte: 10,
+        start_line: 1,
+        end_line: 1,
+    };
 
     // input = FormValue("name")
     let source_call = Instr::Call {
@@ -102,10 +114,15 @@ fn taint_propagation_through_assignment() {
 
     let rules = vec![TaintRule {
         id: "sql-injection".into(),
-        sources: vec![TaintSource { pattern: "FormValue".into(), tag: "user_input".into() }],
+        sources: vec![TaintSource {
+            pattern: "FormValue".into(),
+            tag: "user_input".into(),
+        }],
         sinks: vec![TaintSink {
-            pattern: "Exec".into(), arg_index: 0,
-            cwe: "CWE-89".into(), description: "SQL injection".into(),
+            pattern: "Exec".into(),
+            arg_index: 0,
+            cwe: "CWE-89".into(),
+            description: "SQL injection".into(),
         }],
         sanitizers: vec![],
         severity: "error".into(),
@@ -127,7 +144,12 @@ fn sanitizer_blocks_taint() {
     use crate::types::Span;
     use smallvec::SmallVec;
 
-    let span = Span { start_byte: 0, end_byte: 10, start_line: 1, end_line: 1 };
+    let span = Span {
+        start_byte: 0,
+        end_byte: 10,
+        start_line: 1,
+        end_line: 1,
+    };
 
     // input = FormValue("name")
     let source_call = Instr::Call {
@@ -169,17 +191,27 @@ fn sanitizer_blocks_taint() {
 
     let rules = vec![TaintRule {
         id: "sql-injection".into(),
-        sources: vec![TaintSource { pattern: "FormValue".into(), tag: "user_input".into() }],
-        sinks: vec![TaintSink {
-            pattern: "Exec".into(), arg_index: 0,
-            cwe: "CWE-89".into(), description: "SQL injection".into(),
+        sources: vec![TaintSource {
+            pattern: "FormValue".into(),
+            tag: "user_input".into(),
         }],
-        sanitizers: vec![Sanitizer { pattern: "EscapeString".into() }],
+        sinks: vec![TaintSink {
+            pattern: "Exec".into(),
+            arg_index: 0,
+            cwe: "CWE-89".into(),
+            description: "SQL injection".into(),
+        }],
+        sanitizers: vec![Sanitizer {
+            pattern: "EscapeString".into(),
+        }],
         severity: "error".into(),
     }];
 
     let findings = analyze_taint(&cfg, &rules, "test.go");
-    assert!(findings.is_empty(), "sanitizer should block taint: {findings:?}");
+    assert!(
+        findings.is_empty(),
+        "sanitizer should block taint: {findings:?}"
+    );
 }
 
 #[test]

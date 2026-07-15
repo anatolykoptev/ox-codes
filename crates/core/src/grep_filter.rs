@@ -1,5 +1,5 @@
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use anyhow::Result;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 
 /// Map a language name to its file extensions.
 pub fn lang_extensions(lang: &str) -> Option<&'static [&'static str]> {
