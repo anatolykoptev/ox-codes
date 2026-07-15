@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 
 use ox_core::grep_filter::build_globset;
 use ox_dataflow::{DataflowInput, DataflowResponse, Finding, analysis, scope_walker};
-use ox_langs::get_language;
+use ox_langs::{get_language, language_id};
 
 use crate::dataflow_cache::{DataflowCache, DataflowCacheKey};
 
@@ -95,6 +95,11 @@ fn analyze_directory(input: DataflowInput, cache: &DataflowCache) -> Result<Data
 fn build_key(input: &DataflowInput, canonical_root: &Path) -> Result<DataflowCacheKey> {
     let lang_cfg = get_language(&input.language)
         .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
+    // Normalize the language alias to its canonical id (parity with the scope
+    // cache) so `go`/`golang` (or `ts`/`typescript`) share one cache entry
+    // instead of producing duplicate recompute + double memory.
+    let canonical_lang = language_id(&input.language)
+        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
     let include = input.file_glob.as_deref().map(build_globset).transpose()?;
     let exclude = input
         .exclude_glob
@@ -112,7 +117,7 @@ fn build_key(input: &DataflowInput, canonical_root: &Path) -> Result<DataflowCac
 
     Ok(DataflowCacheKey {
         canonical_root: canonical_root.to_path_buf(),
-        language: input.language.clone(),
+        language: canonical_lang.to_string(),
         file_glob: input.file_glob.clone(),
         exclude_glob: input.exclude_glob.clone(),
         max_results: input.max_results,
@@ -606,6 +611,45 @@ function leaks() {
         assert_eq!(misses, 1, "shared cache should have exactly one miss");
         assert_eq!(hits, 1, "second shared-cache call should be a hit");
         assert_eq!(analyses, 1, "only one analysis should run");
+    }
+
+    /// Parity with the scope-cache alias test: `go` and `golang` are the same
+    /// grammar, so the dataflow cache key must normalize to the canonical id
+    /// and share one entry — no duplicate analysis, no double memory.
+    #[test]
+    fn test_dataflow_cache_alias_key() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.go"));
+            std::fs::write(&path, "package main\n\nfunc F() {}\n").unwrap();
+        }
+
+        let root = dir.path().to_string_lossy().into_owned();
+        let input = DataflowInput {
+            root: root.clone(),
+            language: "go".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::with_capacity(64);
+
+        let _ = analyze_directory(input.clone(), &cache).unwrap();
+        let (_, m1, a1) = cache.stats();
+        assert_eq!(m1, 1, "first call with canonical 'go' should be a miss");
+        assert_eq!(a1, 1, "first call should run one analysis");
+
+        let alias_input = DataflowInput {
+            language: "golang".to_string(),
+            ..input
+        };
+        let _ = analyze_directory(alias_input, &cache).unwrap();
+        let (h2, m2, a2) = cache.stats();
+        assert_eq!(m2, 1, "alias 'golang' should not create an additional miss");
+        assert_eq!(h2, 1, "alias 'golang' should hit the canonical 'go' entry");
+        assert_eq!(a2, 1, "alias 'golang' should not trigger a second analysis");
     }
 }
 
