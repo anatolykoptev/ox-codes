@@ -27,6 +27,13 @@ impl LangWrapper {
     fn new(ts_lang: TSLanguage, expando: char) -> Self {
         Self { ts_lang, expando }
     }
+
+    /// The underlying tree-sitter language — the SAME grammar used for
+    /// ast-grep matching. Used to re-parse a rewritten buffer for the
+    /// post-write invariant (reject persist if it introduces new ERROR nodes).
+    pub(crate) fn ts_language(&self) -> TSLanguage {
+        self.ts_lang.clone()
+    }
 }
 
 impl AstLang for LangWrapper {

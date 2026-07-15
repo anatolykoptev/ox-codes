@@ -1,4 +1,7 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Result, bail};
@@ -6,10 +9,38 @@ use ast_grep_core::AstGrep;
 use ast_grep_core::matcher::Pattern;
 use ast_grep_core::tree_sitter::StrDoc;
 use ignore::WalkBuilder;
+use tree_sitter::{Language, Parser};
 
 use crate::grep_filter::build_globset;
 use crate::structural::{file_matches_lang, lang_wrapper};
 use crate::types::{RewriteFileResult, RewriteInput, RewriteResponse};
+
+// ── Per-path write serialization (issue #47) ──────────────────────────────────
+//
+// `/rewrite apply=true` does an unsynchronized read→compute→persist. Two
+// concurrent calls on the SAME file each compute `modified` from their own
+// snapshot and the last persist silently overwrites the other's edit. We
+// serialize the whole critical section per canonicalized target path via a
+// fixed-size stripe of mutexes keyed by a hash of the canonical path: same
+// path → same stripe → serialized; different files usually hash to different
+// stripes and proceed in parallel. No new dependency (std::sync only).
+const WRITE_LOCK_STRIPES: usize = 64;
+
+fn write_locks() -> &'static [Mutex<()>] {
+    static LOCKS: OnceLock<Vec<Mutex<()>>> = OnceLock::new();
+    LOCKS.get_or_init(|| (0..WRITE_LOCK_STRIPES).map(|_| Mutex::new(())).collect())
+}
+
+/// Pick the stripe mutex for `path`. Canonicalizes so that two paths referring
+/// to the same file (after symlink resolution) hash to the same stripe; falls
+/// back to the literal path if canonicalize fails (file not yet readable).
+fn stripe_for(path: &Path) -> &'static Mutex<()> {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut h = DefaultHasher::new();
+    key.hash(&mut h);
+    let idx = (h.finish() as usize) % WRITE_LOCK_STRIPES;
+    &write_locks()[idx]
+}
 
 pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
     let start = Instant::now();
@@ -33,6 +64,7 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
     let root = Path::new(&input.root);
     let mut files: Vec<RewriteFileResult> = Vec::new();
     let mut total_matches = 0usize;
+    let mut total_skipped = 0usize;
 
     let walker = WalkBuilder::new(root)
         .standard_filters(true)
@@ -57,6 +89,17 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
             continue;
         }
 
+        // For apply=true, serialize the full read→compute→persist critical
+        // section per canonicalized path so two concurrent rewrites of the
+        // SAME file cannot lose an edit (issue #47). Dry runs hold no lock.
+        let _write_guard = if input.apply {
+            Some(stripe_for(path).lock().map_err(|e| {
+                anyhow::anyhow!("rewrite: write lock poisoned for {}: {e}", path.display())
+            })?)
+        } else {
+            None
+        };
+
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(_) => continue,
@@ -76,12 +119,44 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
             continue;
         }
 
-        let match_count = edits.len();
-        total_matches += match_count;
+        // Bug A (#41): ast-grep `find_all` returns nested/overlapping matches
+        // (e.g. `foo($$$ARGS)` on `foo(foo(x))` yields an outer + inner match,
+        // each replacement captured from the pristine tree). Applying both
+        // with reverse-order `replace_range` lets the outer edit overwrite the
+        // inner edit's bytes using the untouched original inner snippet,
+        // silently erasing the inner rewrite. Resolve overlaps BEFORE applying:
+        // sort by (pos asc, widest-first at equal start), greedily accept
+        // non-overlapping edits, skip any whose `[pos, pos+del)` intersects an
+        // already-accepted one — mirroring the ast-grep CLI's conflicting-edit
+        // skip. `total_matches`/`matches` count only APPLIED edits; `skipped`
+        // surfaces the dropped count.
+        let (accepted, skipped) = resolve_overlaps(edits);
+        let applied = accepted.len();
+        total_matches += applied;
+        total_skipped += skipped;
 
-        let modified = apply_edits(&src, edits);
+        let modified = apply_edits(&src, accepted);
 
         if input.apply {
+            // Post-write invariant (#41): re-parse the modified buffer with the
+            // SAME grammar used for matching. If it fails to parse at all or
+            // introduces NEW ERROR/MISSING nodes that were not in the original
+            // tree, do NOT persist — bail before touching disk so the file is
+            // left untouched rather than corrupted.
+            let ts_lang = wrapper.ts_language();
+            let orig_errors = count_errors(&src, &ts_lang).unwrap_or(usize::MAX);
+            let new_errors = count_errors(&modified, &ts_lang).unwrap_or(usize::MAX);
+            if new_errors > orig_errors {
+                bail!(
+                    "rewrite: refusing to persist {}: re-parse introduced {} new ERROR node(s) \
+                     (original={}, modified={}); the rewrite would corrupt the file",
+                    path.display(),
+                    new_errors - orig_errors,
+                    orig_errors,
+                    new_errors
+                );
+            }
+
             // Atomic write: NamedTempFile gives unique name + persist() does rename(2).
             // WalkBuilder(follow_links=false) means we only write files inside root.
             let dir = path
@@ -100,7 +175,8 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
 
         files.push(RewriteFileResult {
             file: rel_path,
-            matches: match_count,
+            matches: applied,
+            skipped,
             diff,
         });
 
@@ -113,12 +189,16 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
     Ok(RewriteResponse {
         files,
         total_matches,
+        total_skipped,
         total_files,
         duration_ms: start.elapsed().as_millis() as u64,
     })
 }
 
 /// Apply a list of (position, deleted_length, replacement) edits to source.
+/// Edits MUST be non-overlapping (caller runs them through `resolve_overlaps`
+/// first); they are applied in reverse position order so earlier edits don't
+/// shift the byte offsets of later ones.
 fn apply_edits(source: &str, mut edits: Vec<(usize, usize, String)>) -> String {
     edits.sort_by_key(|(pos, _, _)| *pos);
     let mut result = source.to_string();
@@ -127,6 +207,59 @@ fn apply_edits(source: &str, mut edits: Vec<(usize, usize, String)>) -> String {
         result.replace_range(pos..end, &replacement);
     }
     result
+}
+
+/// Resolve overlapping/nested edits before applying them.
+///
+/// Sort by `pos` ascending; at equal start, widest (longest deletion) first so
+/// the outer of two nested matches deterministically wins over the inner one.
+/// Then greedily accept edits whose `[pos, pos+del)` range does NOT intersect
+/// the tail (`last_end`) of the already-accepted run, and skip the rest.
+/// Adjacent (touching, `pos == last_end`) edits are NOT overlapping and are
+/// both accepted. Mirrors the ast-grep CLI's conflicting-edit skip.
+///
+/// Returns `(accepted, skipped_count)`.
+fn resolve_overlaps(
+    mut edits: Vec<(usize, usize, String)>,
+) -> (Vec<(usize, usize, String)>, usize) {
+    edits.sort_by(|(p1, d1, _), (p2, d2, _)| p1.cmp(p2).then_with(|| d2.cmp(d1)));
+    let mut accepted: Vec<(usize, usize, String)> = Vec::with_capacity(edits.len());
+    let mut last_end: Option<usize> = None;
+    let mut skipped = 0usize;
+    for (pos, del, repl) in edits {
+        let end = pos + del;
+        if last_end.is_some_and(|le| pos < le) {
+            // This edit's start lies inside a previously accepted edit's range.
+            skipped += 1;
+            continue;
+        }
+        accepted.push((pos, del, repl));
+        last_end = Some(end);
+    }
+    (accepted, skipped)
+}
+
+/// Parse `src` with `lang` and count `ERROR`/`MISSING` nodes in the tree.
+/// Returns `None` if the buffer fails to parse at all (treated as maximally
+/// erroneous by the caller's invariant check).
+fn count_errors(src: &str, lang: &Language) -> Option<usize> {
+    let mut parser = Parser::new();
+    parser.set_language(lang).ok()?;
+    let tree = parser.parse(src.as_bytes(), None)?;
+    Some(count_errors_in(tree.root_node()))
+}
+
+fn count_errors_in(node: tree_sitter::Node) -> usize {
+    let mut n = 0;
+    if node.kind() == "ERROR" || node.kind() == "MISSING" {
+        n += 1;
+    }
+    let mut i = 0;
+    while let Some(child) = node.child(i) {
+        n += count_errors_in(child);
+        i += 1;
+    }
+    n
 }
 
 fn unified_diff(file_path: &str, original: &str, modified: &str) -> String {
@@ -140,6 +273,8 @@ fn unified_diff(file_path: &str, original: &str, modified: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Arc;
+    use std::thread;
     use tempfile::TempDir;
 
     #[test]
@@ -256,6 +391,186 @@ mod tests {
             content.contains("fmt.Errorf"),
             "file not updated on disk: {}",
             content
+        );
+    }
+
+    /// Re-parse `src` with the tree-sitter grammar for `lang_name` and return
+    /// the number of `ERROR` nodes in the tree. Used to assert the persisted
+    /// buffer is not silently corrupted into invalid syntax.
+    fn count_error_nodes(src: &str, lang_name: &str) -> usize {
+        let cfg = match ox_langs::get_language(lang_name) {
+            Some(c) => c,
+            None => return 0,
+        };
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&cfg.language).is_err() {
+            return usize::MAX;
+        }
+        let tree = match parser.parse(src.as_bytes(), None) {
+            Some(t) => t,
+            None => return usize::MAX,
+        };
+        fn walk(node: tree_sitter::Node) -> usize {
+            let mut n = 0;
+            if node.kind() == "ERROR" || node.kind() == "MISSING" {
+                n += 1;
+            }
+            let mut i = 0;
+            while let Some(child) = node.child(i) {
+                n += walk(child);
+                i += 1;
+            }
+            n
+        }
+        walk(tree.root_node())
+    }
+
+    /// Bug A (#41): nested/overlapping ast-grep matches must not silently
+    /// corrupt the file. `foo($$$ARGS)` matches `foo(foo(x))` at BOTH nesting
+    /// depths (outer + inner); the outer edit's replacement is captured from
+    /// the pristine tree and would overwrite the inner edit's bytes, erasing
+    /// the inner rewrite while still counting it in `total_matches`.
+    ///
+    /// Fix: detect overlapping byte ranges, greedily accept non-overlapping
+    /// edits (widest-first at equal start), skip the rest, surface the skipped
+    /// count, and re-parse the result with the same grammar before persisting.
+    #[test]
+    fn test_rewrite_nested_overlapping_no_corruption() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.js");
+        // `foo(foo(x))` — outer match = whole call, inner match = `foo(x)`.
+        fs::write(&file_path, "foo(foo(x))\n").unwrap();
+
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "foo($$$ARGS)".into(),
+            rewrite: "bar($$$ARGS)".into(),
+            language: "javascript".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: true,
+        };
+        let result = rewrite(input).unwrap();
+        let f = &result.files[0];
+
+        // (b) overlapping matches handled deterministically + skipped reported.
+        // Today: find_all returns 2 nested matches, both counted, inner erased.
+        // After fix: only the outer (widest, first) is applied; inner is skipped.
+        assert_eq!(
+            f.matches,
+            1,
+            "matches must count only APPLIED edits, got {} (raw find_all={})",
+            f.matches,
+            f.matches + f.skipped
+        );
+        assert_eq!(
+            f.skipped, 1,
+            "the nested inner match must be reported as skipped, not silently dropped"
+        );
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.total_skipped, 1);
+
+        // (a) NO silent corruption: the persisted buffer re-parses cleanly with
+        // the SAME grammar (no new ERROR/MISSING nodes).
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            count_error_nodes(&content, "javascript"),
+            0,
+            "persisted buffer does not re-parse cleanly: {content}"
+        );
+        // Deterministic outcome: outer applied, inner skipped.
+        assert_eq!(content, "bar(foo(x))\n");
+    }
+
+    /// Bug A (#41) — post-write re-parse invariant: a rewrite whose result is
+    /// syntactically invalid for the target grammar must NOT be persisted.
+    /// Today there is no re-parse check, so the corrupt buffer is written and
+    /// the call returns Ok. After fix the write is rolled back (Err returned,
+    /// file untouched).
+    #[test]
+    fn test_rewrite_apply_reparse_invariant_rejects_invalid() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.js");
+        let original = "foo(x)\n";
+        fs::write(&file_path, original).unwrap();
+
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "foo($$$ARGS)".into(),
+            // Replacement is syntactically invalid JavaScript.
+            rewrite: ")))(((".into(),
+            language: "javascript".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: true,
+        };
+        let result = rewrite(input);
+
+        assert!(
+            result.is_err(),
+            "rewrite of a match into invalid syntax must be rejected, not persisted; got Ok with {:?}",
+            result.ok()
+        );
+        // File must be left untouched (write rolled back).
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original,
+            "corrupt buffer must not be persisted; file was changed to: {content}"
+        );
+    }
+
+    /// Bug B (#47): two concurrent `/rewrite apply=true` on the SAME file but
+    /// different non-overlapping match sites must both land. Today the
+    /// read-compute-persist is unsynchronized, so the last persist silently
+    /// overwrites the other's edit. After fix a per-canonical-path lock
+    /// serializes the write path.
+    #[test]
+    fn test_rewrite_concurrent_apply_same_file() {
+        let dir = TempDir::new().unwrap();
+        let dir = Arc::new(dir.path().to_path_buf());
+        let file_path = dir.join("test.js");
+        fs::write(&file_path, "foo(x)\nbar(y)\n").unwrap();
+
+        let dir1 = dir.clone();
+        let t1 = thread::spawn(move || {
+            let input = RewriteInput {
+                root: dir1.to_string_lossy().into(),
+                pattern: "foo($$$A)".into(),
+                rewrite: "foo2($$$A)".into(),
+                language: "javascript".into(),
+                max_results: 50,
+                file_glob: None,
+                exclude_glob: None,
+                apply: true,
+            };
+            rewrite(input).unwrap()
+        });
+
+        let dir2 = dir.clone();
+        let t2 = thread::spawn(move || {
+            let input = RewriteInput {
+                root: dir2.to_string_lossy().into(),
+                pattern: "bar($$$A)".into(),
+                rewrite: "bar2($$$A)".into(),
+                language: "javascript".into(),
+                max_results: 50,
+                file_glob: None,
+                exclude_glob: None,
+                apply: true,
+            };
+            rewrite(input).unwrap()
+        });
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+        assert!(r1.total_matches >= 1 && r2.total_matches >= 1);
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(
+            content.contains("foo2") && content.contains("bar2"),
+            "both concurrent edits must be present; lost an update. file={content}"
         );
     }
 }

@@ -102,6 +102,11 @@ pub struct RewriteInput {
 pub struct RewriteResponse {
     pub files: Vec<RewriteFileResult>,
     pub total_matches: usize,
+    /// Total edits dropped because their byte range overlapped/nested with an
+    /// already-accepted edit (mirrors ast-grep CLI's conflicting-edit skip).
+    /// `total_matches` counts only edits ACTUALLY applied.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub total_skipped: usize,
     pub total_files: usize,
     pub duration_ms: u64,
 }
@@ -110,7 +115,14 @@ pub struct RewriteResponse {
 pub struct RewriteFileResult {
     pub file: String,
     pub matches: usize,
+    /// Edits skipped for this file due to overlapping/nested match ranges.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped: usize,
     pub diff: String,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize)]
