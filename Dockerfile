@@ -21,6 +21,10 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 3: Builder
 FROM chef AS builder
+# OOM guard (rust-build-setup §5): a base-image bump forces a cold rebuild
+# whose deps recompile; in-container cargo ignores the host jobs=2 cap and
+# OOMs the shared 4-core box. Cap parallelism here (the legit in-container place).
+ENV CARGO_BUILD_JOBS=2
 ENV RUSTC_WRAPPER=sccache
 ENV SCCACHE_DIR=/sccache
 ENV SCCACHE_CACHE_SIZE=20G
