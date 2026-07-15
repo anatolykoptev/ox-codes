@@ -192,7 +192,10 @@ fn filtered_walk<'a>(
     max_files: Option<usize>,
 ) -> FilteredWalk<'a> {
     FilteredWalk {
-        walk: WalkBuilder::new(root).standard_filters(true).build(),
+        walk: WalkBuilder::new(root)
+            .standard_filters(true)
+            .sort_by_file_path(|a, b| a.cmp(b))
+            .build(),
         root,
         lang_cfg,
         include,
