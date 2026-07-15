@@ -19,7 +19,7 @@ mod zig;
 use tree_sitter::Language;
 
 /// Scope kinds for AST-aware search.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScopeKind {
     FunctionBodies,
     Comments,

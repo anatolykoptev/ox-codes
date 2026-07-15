@@ -10,7 +10,12 @@ use axum::{
     routing::{get, post},
 };
 
-pub fn router() -> Router {
+#[derive(Clone)]
+pub struct AppState {
+    pub scope_cache: ox_core::ScopeCache,
+}
+
+pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/search", post(search::handle))
@@ -19,6 +24,7 @@ pub fn router() -> Router {
         .route("/rewrite", post(rewrite::handle))
         .route("/dataflow/analyze", post(dataflow::handle))
         .route("/dataflow/taint", post(taint::handle))
+        .with_state(state)
 }
 
 async fn health() -> &'static str {

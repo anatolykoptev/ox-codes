@@ -39,7 +39,7 @@ pub struct SearchInput {
     pub format: Format,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ScopedSearchInput {
     pub root: String,
     pub pattern: String,
@@ -131,7 +131,7 @@ pub struct SearchMatch {
 }
 
 /// A match expanded to its surrounding AST context.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ExpandedMatch {
     pub file: String,
     pub line: usize,
@@ -143,7 +143,7 @@ pub struct ExpandedMatch {
     pub expanded: Option<ExpandedBlock>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ExpandedBlock {
     pub symbol_name: String,
     pub symbol_kind: String,
