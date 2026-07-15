@@ -35,6 +35,17 @@ const SEMAPHORE_PERMITS: usize = 8;
 /// instead of queueing forever in `.acquire().await` with no timeout.
 const WALK_ACQUIRE_TIMEOUT_SECS: u64 = 5;
 
+/// Server-side maximum for caller-supplied `max_results`. An explicit
+/// oversized value (or the default 100) is clamped to this — without it, a
+/// caller can request unbounded findings, producing huge cache entries.
+const MAX_MAX_RESULTS: usize = 1000;
+
+/// Server-side maximum for caller-supplied `max_files`. An explicit JSON
+/// `null` deserializes to `None` (walks everything) — clamped to this. An
+/// explicit oversized value is also clamped. Without this, a caller can
+/// force a full-repo walk on arbitrarily large repos.
+const MAX_MAX_FILES: usize = 10_000;
+
 static WALK_SEMAPHORE: Semaphore = Semaphore::const_new(SEMAPHORE_PERMITS);
 
 // ── Walk observability ───────────────────────────────────────────────────
@@ -67,6 +78,7 @@ impl WalkMetrics {
         }
     }
 
+    #[cfg(test)]
     fn new() -> Self {
         Self {
             in_flight: AtomicU64::new(0),
@@ -137,10 +149,26 @@ async fn acquire_walk_permit(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// Clamp caller-supplied `max_results` and `max_files` to server-side maximums.
+///
+/// Without this, an explicit JSON `null` for `max_files` deserializes to `None`
+/// (walks everything) and an oversized `max_results` passes through unclamped —
+/// only ABSENT fields get a serde default. This produces unbounded cache entries
+/// and multi-minute walks on large repos.
+fn clamp_input(mut input: DataflowInput) -> DataflowInput {
+    input.max_results = input.max_results.min(MAX_MAX_RESULTS);
+    input.max_files = Some(input.max_files.unwrap_or(MAX_MAX_FILES).min(MAX_MAX_FILES));
+    input
+}
+
 pub async fn handle(
     State(state): State<crate::AppState>,
     Json(input): Json<DataflowInput>,
 ) -> Result<Json<DataflowResponse>, (StatusCode, String)> {
+    // Clamp caller-supplied limits to server-side maximums before any analysis
+    // or caching — prevents unbounded walks and oversized cache entries.
+    let input = clamp_input(input);
+
     // Acquire a walk permit with a bounded timeout. If all permits are held
     // by in-flight walks, fail fast with 503 instead of queueing forever.
     let _permit = acquire_walk_permit(
@@ -430,6 +458,47 @@ mod tests {
     use ox_dataflow::DataflowInput;
     use tempfile::tempdir;
 
+    /// clamp_input must cap oversized caller-supplied max_results and convert
+    /// explicit null max_files (None → walks everything) to a server-side max.
+    /// Reverting clamp_input (passing values through unclamped) REDS this test.
+    #[test]
+    fn test_clamp_input_caps_oversized_values() {
+        let input = DataflowInput {
+            root: "/tmp".into(),
+            language: "typescript".into(),
+            max_results: 100_000,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+        let clamped = clamp_input(input);
+        assert_eq!(
+            clamped.max_results, MAX_MAX_RESULTS,
+            "oversized max_results should be clamped to server-side max"
+        );
+        assert_eq!(
+            clamped.max_files,
+            Some(MAX_MAX_FILES),
+            "null max_files (None) should be clamped to Some(MAX_MAX_FILES)"
+        );
+    }
+
+    /// clamp_input must leave already-in-range values unchanged.
+    #[test]
+    fn test_clamp_input_passes_through_in_range_values() {
+        let input = DataflowInput {
+            root: "/tmp".into(),
+            language: "typescript".into(),
+            max_results: 50,
+            max_files: Some(500),
+            file_glob: None,
+            exclude_glob: None,
+        };
+        let clamped = clamp_input(input);
+        assert_eq!(clamped.max_results, 50);
+        assert_eq!(clamped.max_files, Some(500));
+    }
+
     /// Verifies that analyze_directory stops at max_files even when the
     /// directory contains more matching files.
     #[test]
@@ -488,10 +557,7 @@ mod tests {
 
         let cache = DataflowCache::new();
         let result = analyze_directory(input, &cache).unwrap();
-        assert_eq!(
-            result.files_analyzed, 3,
-            "all 3 files should be analyzed"
-        );
+        assert_eq!(result.files_analyzed, 3, "all 3 files should be analyzed");
         assert!(
             !result.files_truncated,
             "files_truncated must be false when the walk naturally exhausted at exactly the cap \
@@ -631,7 +697,7 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let cache = DataflowCache::with_capacity(64);
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
 
         let r1 = analyze_directory(input.clone(), &cache).unwrap();
         let (h1, m1, a1) = cache.stats();
@@ -680,7 +746,7 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let cache = DataflowCache::with_capacity(64);
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
 
         let r1 = analyze_directory(input.clone(), &cache).unwrap();
         let (_h1, m1, a1) = cache.stats();
@@ -742,7 +808,7 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let cache = DataflowCache::with_capacity(64);
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
 
         let cold = analyze_directory(input.clone(), &DataflowCache::new()).unwrap();
         let warm1 = analyze_directory(input.clone(), &cache).unwrap();
@@ -792,7 +858,7 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let cache = DataflowCache::with_capacity(64);
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
 
         let _ = analyze_directory(input.clone(), &cache).unwrap();
         let (_, m1, a1) = cache.stats();
@@ -845,7 +911,10 @@ mod semaphore_tests {
         let _blocker = sem.acquire().await.unwrap();
 
         let result = acquire_walk_permit(&sem, Duration::from_millis(50)).await;
-        assert!(result.is_err(), "saturated semaphore should return an error");
+        assert!(
+            result.is_err(),
+            "saturated semaphore should return an error"
+        );
         let (status, msg) = result.unwrap_err();
         assert_eq!(
             status,
@@ -895,7 +964,10 @@ mod semaphore_tests {
         drop(slot2);
         let (in_flight, oldest) = metrics.stats();
         assert_eq!(in_flight, 0, "in_flight should return to 0");
-        assert_eq!(oldest, 0, "oldest_start_ms should clear when no walks remain");
+        assert_eq!(
+            oldest, 0,
+            "oldest_start_ms should clear when no walks remain"
+        );
     }
 
     /// 10 concurrent fast requests all complete successfully.
