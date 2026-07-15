@@ -3,6 +3,11 @@ name = "ox-langs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Tree-sitter language definitions and AST scope queries for 15 languages (part of ox-codes)."
+keywords = ["tree-sitter", "ast", "parsing", "languages", "code-search"]
+categories = ["parsing", "development-tools"]
 
 [dependencies]
 tree-sitter = "0.26"

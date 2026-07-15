@@ -3,9 +3,14 @@ name = "ox-dataflow"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Intraprocedural dataflow engine (IL, CFG, def-use, reaching definitions, taint tracking) (part of ox-codes)."
+keywords = ["dataflow", "taint-analysis", "static-analysis", "cfg", "code-analysis"]
+categories = ["development-tools", "parsing"]
 
 [dependencies]
-ox-langs = { path = "../langs" }
+ox-langs = { path = "../langs", version = "0.1.0" }
 tree-sitter = "0.26"
 tree-sitter-svelte-next = "0.1.1"
 tree-sitter-typescript = "0.23"

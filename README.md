@@ -1,7 +1,7 @@
 # ox-codes
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust 1.93+](https://img.shields.io/badge/rust-1.93%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.97+](https://img.shields.io/badge/rust-1.97%2B-orange.svg)](https://www.rust-lang.org)
 [![Docker ready](https://img.shields.io/badge/docker-ready-2496ED.svg)](Dockerfile)
 
 Code search and structural rewrite as an HTTP service. Wraps [ripgrep](https://github.com/BurntSushi/ripgrep), [tree-sitter](https://tree-sitter.github.io), and [ast-grep](https://ast-grep.github.io) behind one JSON API, plus an intraprocedural dataflow engine on top.
@@ -13,15 +13,16 @@ Code search and structural rewrite as an HTTP service. Wraps [ripgrep](https://g
 - **Structural rewrite** — search-and-replace at the AST level; preview as a unified diff before applying.
 - **Dataflow analysis** — detect dead stores, unused variables, and tainted data flows (source→sink) without spinning up a compiler.
 - **Zero state, zero auth** — stateless HTTP service; mount the directories you want analyzed and call the API.
+- **Warm-cache speed** — scoped-search and dataflow results are cached per repo, keyed on each file's mtime+size and invalidated on change, so repeat queries on an unchanged tree return from cache (sub-millisecond) instead of re-parsing.
 
 ## Quick start
 
 ```sh
 git clone https://github.com/anatolykoptev/ox-codes
 cd ox-codes
-make build   # cargo build --workspace  (requires Rust 1.93+)
+make build   # cargo build --workspace  (requires Rust 1.97+)
 make test    # cargo test --workspace
-make run     # cargo run -p ox-codes -- --port 8902
+cargo run -p ox-codes -- --port 8902   # start the HTTP service
 ```
 
 Then send a search request:
@@ -56,6 +57,7 @@ Response:
 | `POST /dataflow/analyze` | custom IL/CFG | Dead stores, unused variables (Go, Python) |
 | `POST /dataflow/taint` | custom IL/CFG | Taint tracking source→sink with built-in or custom rules |
 | `GET /health` | — | Liveness probe |
+| `GET /cache/stats` | — | Hit/miss counters + entry counts for the scoped and dataflow result caches |
 
 All search endpoints support `expand` (`"none"` / `"function"` / `"block"`) and `max_tokens` for returning full enclosing AST blocks instead of single matched lines.
 
