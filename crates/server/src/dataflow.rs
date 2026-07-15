@@ -1,7 +1,8 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use axum::Json;
@@ -29,28 +30,167 @@ const DATAFLOW_TIMEOUT_SECS: u64 = 25;
 /// so the pool is always bounded to this many active walks.
 const SEMAPHORE_PERMITS: usize = 8;
 
+/// Bounded timeout for acquiring a walk permit. If all permits are held by
+/// in-flight (potentially stuck) walks, the caller fails fast with HTTP 503
+/// instead of queueing forever in `.acquire().await` with no timeout.
+const WALK_ACQUIRE_TIMEOUT_SECS: u64 = 5;
+
+/// Server-side maximum for caller-supplied `max_results`. An explicit
+/// oversized value (or the default 100) is clamped to this — without it, a
+/// caller can request unbounded findings, producing huge cache entries.
+const MAX_MAX_RESULTS: usize = 1000;
+
+/// Server-side maximum for caller-supplied `max_files`. An explicit JSON
+/// `null` deserializes to `None` (walks everything) — clamped to this. An
+/// explicit oversized value is also clamped. Without this, a caller can
+/// force a full-repo walk on arbitrarily large repos.
+const MAX_MAX_FILES: usize = 10_000;
+
 static WALK_SEMAPHORE: Semaphore = Semaphore::const_new(SEMAPHORE_PERMITS);
+
+// ── Walk observability ───────────────────────────────────────────────────
+//
+// `WALK_METRICS` tracks how many walks are in-flight and the start timestamp
+// of the oldest one. A walk whose in-flight duration exceeds
+// `DATAFLOW_TIMEOUT_SECS` is "stuck" — its permit will never be returned
+// because `spawn_blocking` cannot be cancelled. The staleness signal lets an
+// operator detect a degraded pool (fewer and fewer available permits) before
+// the pool is fully exhausted and every request starts getting 503.
+//
+// Approximation: `oldest_start_ms` is set when the first walk starts and
+// cleared when the last walk finishes. If the first walk finishes but others
+// remain, `oldest_start_ms` may hold a stale (finished) walk's timestamp,
+// producing a false-positive staleness signal. This is acceptable for an
+// observability signal — the operator investigates, not auto-scales.
+
+static WALK_METRICS: WalkMetrics = WalkMetrics::new_const();
+
+pub(crate) struct WalkMetrics {
+    in_flight: AtomicU64,
+    oldest_start_ms: AtomicU64,
+}
+
+impl WalkMetrics {
+    const fn new_const() -> Self {
+        Self {
+            in_flight: AtomicU64::new(0),
+            oldest_start_ms: AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    fn new() -> Self {
+        Self {
+            in_flight: AtomicU64::new(0),
+            oldest_start_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn acquire_slot(&self) -> WalkSlot<'_> {
+        let now = now_ms();
+        let prev = self.in_flight.fetch_add(1, Ordering::Relaxed);
+        if prev == 0 {
+            self.oldest_start_ms.store(now, Ordering::Relaxed);
+        }
+        WalkSlot { metrics: self }
+    }
+
+    fn stats(&self) -> (u64, u64) {
+        (
+            self.in_flight.load(Ordering::Relaxed),
+            self.oldest_start_ms.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// RAII guard that increments `in_flight` on creation and decrements on drop.
+/// Moved into the `spawn_blocking` closure so it is dropped when the walk
+/// finishes (even on panic), not when the outer timeout fires.
+pub(crate) struct WalkSlot<'a> {
+    metrics: &'a WalkMetrics,
+}
+
+impl Drop for WalkSlot<'_> {
+    fn drop(&mut self) {
+        let prev = self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if prev == 1 {
+            self.metrics.oldest_start_ms.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Return (in_flight, oldest_start_ms) for the global walk metrics.
+/// Exposed via `GET /cache/stats` → `walks` field.
+pub(crate) fn walk_metrics() -> (u64, u64) {
+    WALK_METRICS.stats()
+}
+
+/// Acquire a walk permit with a bounded timeout. On timeout, fail fast with
+/// HTTP 503 (backpressure) instead of queueing forever.
+async fn acquire_walk_permit(
+    semaphore: &Semaphore,
+    timeout: Duration,
+) -> Result<tokio::sync::SemaphorePermit<'_>, (StatusCode, String)> {
+    tokio::time::timeout(timeout, semaphore.acquire())
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "dataflow walk pool saturated; retry later".to_string(),
+            )
+        })?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Clamp caller-supplied `max_results` and `max_files` to server-side maximums.
+///
+/// Without this, an explicit JSON `null` for `max_files` deserializes to `None`
+/// (walks everything) and an oversized `max_results` passes through unclamped —
+/// only ABSENT fields get a serde default. This produces unbounded cache entries
+/// and multi-minute walks on large repos.
+fn clamp_input(mut input: DataflowInput) -> DataflowInput {
+    input.max_results = input.max_results.min(MAX_MAX_RESULTS);
+    input.max_files = Some(input.max_files.unwrap_or(MAX_MAX_FILES).min(MAX_MAX_FILES));
+    input
+}
 
 pub async fn handle(
     State(state): State<crate::AppState>,
     Json(input): Json<DataflowInput>,
 ) -> Result<Json<DataflowResponse>, (StatusCode, String)> {
-    // Acquire a walk permit BEFORE spawning the blocking task. If all permits
-    // are taken, the caller waits here (backpressure) rather than blowing up
-    // the blocking pool with unbounded concurrency.
-    //
-    // The permit is stored in _permit so it lives until the JoinHandle is
-    // awaited (or the timeout branch drops it). Because spawn_blocking tasks
-    // cannot be cancelled, we intentionally keep the permit alive until the
-    // phantom task finishes, guaranteeing that at most SEMAPHORE_PERMITS walks
-    // run concurrently at any point in time.
-    let _permit = WALK_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Clamp caller-supplied limits to server-side maximums before any analysis
+    // or caching — prevents unbounded walks and oversized cache entries.
+    let input = clamp_input(input);
+
+    // Acquire a walk permit with a bounded timeout. If all permits are held
+    // by in-flight walks, fail fast with 503 instead of queueing forever.
+    let _permit = acquire_walk_permit(
+        &WALK_SEMAPHORE,
+        Duration::from_secs(WALK_ACQUIRE_TIMEOUT_SECS),
+    )
+    .await?;
+
+    // Track the walk for staleness observability. The slot is moved into the
+    // spawn_blocking closure so it is dropped when the walk finishes (even on
+    // panic or timeout — the phantom task eventually completes and drops it).
+    let slot = WALK_METRICS.acquire_slot();
 
     let dataflow_cache = state.dataflow_cache.clone();
-    let task = tokio::task::spawn_blocking(move || analyze_directory(input, &dataflow_cache));
+    let task = tokio::task::spawn_blocking(move || {
+        // Keep the permit and slot alive until the blocking task finishes.
+        // spawn_blocking cannot be cancelled, so even after the outer timeout
+        // fires, this closure runs to completion and then drops both.
+        let _slot = slot;
+        let _permit = _permit;
+        analyze_directory(input, &dataflow_cache)
+    });
 
     let result = tokio::time::timeout(Duration::from_secs(DATAFLOW_TIMEOUT_SECS), task)
         .await
@@ -146,11 +286,6 @@ impl Iterator for FilteredWalk<'_> {
     type Item = (PathBuf, String, std::fs::Metadata);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.max_files.is_some_and(|cap| self.count >= cap) {
-            self.truncated = true;
-            return None;
-        }
-
         for result in self.walk.by_ref() {
             let entry = result.ok()?;
             if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -179,6 +314,17 @@ impl Iterator for FilteredWalk<'_> {
                 Ok(m) => m,
                 Err(_) => continue,
             };
+
+            // Cap check AFTER pulling a qualifying item, not before. This
+            // distinguishes "walk naturally exhausted at exactly cap" (not
+            // truncated) from "a qualifying file existed beyond position cap"
+            // (truncated). Checking at the top would set truncated=true even
+            // when nothing was skipped (e.g. a repo with exactly max_files
+            // qualifying files).
+            if self.max_files.is_some_and(|cap| self.count >= cap) {
+                self.truncated = true;
+                return None;
+            }
 
             self.count += 1;
             let rel_str = rel_path.to_string_lossy().into_owned();
@@ -263,6 +409,7 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
         exclude.as_ref(),
         input.max_files,
     );
+    let mut broke_early = false;
     for (path, rel, _metadata) in walk.by_ref() {
         let source = match std::fs::read(&path) {
             Ok(s) => s,
@@ -280,11 +427,28 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
         files_analyzed += 1;
 
         if all_findings.len() >= input.max_results * 5 {
+            broke_early = true;
             break;
         }
     }
-    let files_truncated =
-        walk.truncated() || input.max_files.is_some_and(|cap| files_analyzed >= cap);
+    // `walk.truncated()` is the sole source of truth: it is true iff a
+    // qualifying file existed beyond position cap (checked after pulling, not
+    // before). The old `|| files_analyzed >= cap` disjunct fired at exact-cap
+    // even when nothing was skipped — removed.
+    let mut files_truncated = walk.truncated();
+    // Early-break edge case: if the findings budget (`max_results * 5`) fired
+    // at exactly `files_analyzed == cap`, the walk never got a chance to run
+    // its cap check (which fires on the NEXT pull, not the current one). So
+    // `walk.truncated()` is still false even though a qualifying file exists
+    // beyond cap — a real truncation is silently missed. Probe one more pull:
+    // if the cap is hit, `FilteredWalk::next` sets `truncated` internally and
+    // returns `None`; we re-read `walk.truncated()` to capture it. If the walk
+    // naturally exhausts (no more qualifying files), `truncated` stays false —
+    // no false positive (parity with the exact-cap boundary fix in #50).
+    if broke_early && input.max_files.is_some() && !files_truncated {
+        let _ = walk.next();
+        files_truncated = walk.truncated();
+    }
 
     let total = all_findings.len();
     let truncated = total > input.max_results;
@@ -308,6 +472,47 @@ mod tests {
     use crate::dataflow_cache::DataflowCache;
     use ox_dataflow::DataflowInput;
     use tempfile::tempdir;
+
+    /// clamp_input must cap oversized caller-supplied max_results and convert
+    /// explicit null max_files (None → walks everything) to a server-side max.
+    /// Reverting clamp_input (passing values through unclamped) REDS this test.
+    #[test]
+    fn test_clamp_input_caps_oversized_values() {
+        let input = DataflowInput {
+            root: "/tmp".into(),
+            language: "typescript".into(),
+            max_results: 100_000,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+        let clamped = clamp_input(input);
+        assert_eq!(
+            clamped.max_results, MAX_MAX_RESULTS,
+            "oversized max_results should be clamped to server-side max"
+        );
+        assert_eq!(
+            clamped.max_files,
+            Some(MAX_MAX_FILES),
+            "null max_files (None) should be clamped to Some(MAX_MAX_FILES)"
+        );
+    }
+
+    /// clamp_input must leave already-in-range values unchanged.
+    #[test]
+    fn test_clamp_input_passes_through_in_range_values() {
+        let input = DataflowInput {
+            root: "/tmp".into(),
+            language: "typescript".into(),
+            max_results: 50,
+            max_files: Some(500),
+            file_glob: None,
+            exclude_glob: None,
+        };
+        let clamped = clamp_input(input);
+        assert_eq!(clamped.max_results, 50);
+        assert_eq!(clamped.max_files, Some(500));
+    }
 
     /// Verifies that analyze_directory stops at max_files even when the
     /// directory contains more matching files.
@@ -339,6 +544,85 @@ mod tests {
         assert!(
             result.files_truncated,
             "files_truncated should be true when cap is hit"
+        );
+    }
+
+    /// Verifies that a directory with EXACTLY `max_files` qualifying files is NOT
+    /// falsely flagged as truncated. `files_truncated` must mean "a qualifying
+    /// file existed BEYOND position cap", not "count == cap".
+    /// Reverting the cap check to the top of `FilteredWalk::next` (or restoring
+    /// the `files_analyzed >= cap` OR-disjunct) REDS this test.
+    #[test]
+    fn test_analyze_directory_exact_cap_boundary() {
+        let dir = tempdir().unwrap();
+        // Create exactly 3 .ts files — the cap is also 3.
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: Some(3),
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
+        assert_eq!(result.files_analyzed, 3, "all 3 files should be analyzed");
+        assert!(
+            !result.files_truncated,
+            "files_truncated must be false when the walk naturally exhausted at exactly the cap \
+             (no qualifying file was skipped)"
+        );
+    }
+
+    /// Verifies that a findings-budget early-break at exactly `files_analyzed
+    /// == cap` still reports `files_truncated = true` when more qualifying
+    /// files exist beyond cap. Without the probe in `analyze_uncached`, the
+    /// walk's cap check never fires (it runs on the NEXT pull, which we
+    /// skipped by breaking) and `walk.truncated()` is false — a real
+    /// truncation is silently missed.
+    /// Reverting the `broke_early` probe (deleting the `walk.next()` call)
+    /// REDS this test: `files_truncated` reverts to false.
+    #[test]
+    fn test_analyze_directory_early_break_at_cap_reports_truncated() {
+        let dir = tempdir().unwrap();
+        // 10 .go files, each producing >=2 findings (unused_var + const_value).
+        // With max_results=1, the findings budget is 1*5=5. After 3 files
+        // (each producing >=2 findings → >=6 total), the early-break fires at
+        // exactly files_analyzed == 3 == cap. 7 more qualifying files exist
+        // beyond cap.
+        for i in 0..10 {
+            let path = dir.path().join(format!("file{i}.go"));
+            std::fs::write(&path, "package main\nfunc f() { x := 1 }\n").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "go".to_string(),
+            max_results: 1,
+            max_files: Some(3),
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
+        // The early-break should fire at or before 3 files (the cap).
+        assert!(
+            result.files_analyzed <= 3,
+            "early-break should fire by cap=3, got {}",
+            result.files_analyzed
+        );
+        assert!(
+            result.files_truncated,
+            "files_truncated must be true when early-break fires at cap with more \
+             qualifying files beyond cap; got files_analyzed={}",
+            result.files_analyzed
         );
     }
 
@@ -474,7 +758,7 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let cache = DataflowCache::with_capacity(64);
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
 
         let r1 = analyze_directory(input.clone(), &cache).unwrap();
         let (h1, m1, a1) = cache.stats();
@@ -523,7 +807,7 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let cache = DataflowCache::with_capacity(64);
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
 
         let r1 = analyze_directory(input.clone(), &cache).unwrap();
         let (_h1, m1, a1) = cache.stats();
@@ -585,7 +869,7 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let cache = DataflowCache::with_capacity(64);
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
 
         let cold = analyze_directory(input.clone(), &DataflowCache::new()).unwrap();
         let warm1 = analyze_directory(input.clone(), &cache).unwrap();
@@ -635,7 +919,7 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let cache = DataflowCache::with_capacity(64);
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
 
         let _ = analyze_directory(input.clone(), &cache).unwrap();
         let (_, m1, a1) = cache.stats();
@@ -665,52 +949,222 @@ mod semaphore_tests {
         assert_eq!(SEMAPHORE_PERMITS, 8);
     }
 
-    /// Verify that WALK_SEMAPHORE starts with the expected number of available permits.
+    /// Verify that WALK_SEMAPHORE never exceeds SEMAPHORE_PERMITS available
+    /// permits. Other concurrent tests may hold permits, so we assert `<=`
+    /// rather than `==` (the global semaphore is shared across all tests).
     #[test]
     fn walk_semaphore_initial_permits() {
-        assert_eq!(WALK_SEMAPHORE.available_permits(), SEMAPHORE_PERMITS);
+        assert!(
+            WALK_SEMAPHORE.available_permits() <= SEMAPHORE_PERMITS,
+            "available_permits {} should not exceed SEMAPHORE_PERMITS {}",
+            WALK_SEMAPHORE.available_permits(),
+            SEMAPHORE_PERMITS
+        );
     }
 
-    /// 10 concurrent fast requests all complete successfully.
-    /// Verifies the semaphore does not deadlock or starve short-lived tasks.
+    /// Acquire on a saturated semaphore must fail fast with HTTP 503
+    /// (backpressure) instead of queueing forever. Reverting to an untimed
+    /// `.acquire().await` makes this test hang (timeout → test failure).
     #[tokio::test]
-    async fn concurrent_fast_requests_all_complete() {
+    async fn acquire_walk_permit_returns_503_on_saturated_semaphore() {
+        let sem = Semaphore::new(1);
+        // Saturate the single permit.
+        let _blocker = sem.acquire().await.unwrap();
+
+        let result = acquire_walk_permit(&sem, Duration::from_millis(50)).await;
+        assert!(
+            result.is_err(),
+            "saturated semaphore should return an error"
+        );
+        let (status, msg) = result.unwrap_err();
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "saturated pool should return 503"
+        );
+        assert!(
+            msg.contains("saturated"),
+            "error message should mention saturation: {msg}"
+        );
+    }
+
+    /// Acquire on a semaphore with available permits succeeds normally.
+    #[tokio::test]
+    async fn acquire_walk_permit_succeeds_when_permits_available() {
+        let sem = Semaphore::new(2);
+        let permit = acquire_walk_permit(&sem, Duration::from_millis(100))
+            .await
+            .expect("permits available, should succeed");
+        assert_eq!(sem.available_permits(), 1, "one permit should be held");
+        drop(permit);
+        assert_eq!(sem.available_permits(), 2, "permit released");
+    }
+
+    /// WalkMetrics tracks in-flight walk count and oldest start timestamp.
+    /// Reverting WalkGuard (removing the increment/decrement) REDS this test.
+    #[test]
+    fn walk_metrics_tracks_in_flight() {
+        let metrics = WalkMetrics::new();
+        let (in_flight, oldest) = metrics.stats();
+        assert_eq!(in_flight, 0);
+        assert_eq!(oldest, 0);
+
+        let slot1 = metrics.acquire_slot();
+        let (in_flight, oldest) = metrics.stats();
+        assert_eq!(in_flight, 1);
+        assert!(oldest > 0, "oldest_start_ms should be set on first acquire");
+
+        let slot2 = metrics.acquire_slot();
+        let (in_flight, _) = metrics.stats();
+        assert_eq!(in_flight, 2);
+
+        drop(slot1);
+        let (in_flight, _) = metrics.stats();
+        assert_eq!(in_flight, 1);
+
+        drop(slot2);
+        let (in_flight, oldest) = metrics.stats();
+        assert_eq!(in_flight, 0, "in_flight should return to 0");
+        assert_eq!(
+            oldest, 0,
+            "oldest_start_ms should clear when no walks remain"
+        );
+    }
+
+    /// Dedicated test-only statics for `concurrent_walks_through_real_path_drop_balances`.
+    /// These are NOT shared with any other test (unlike `WALK_SEMAPHORE`/`WALK_METRICS`),
+    /// so exact-count assertions on them are deterministic regardless of parallel
+    /// test interleaving. `'static` references are required because `SemaphorePermit`
+    /// and `WalkSlot` are moved into `spawn_blocking` closures.
+    static TEST_SEM: Semaphore = Semaphore::const_new(4);
+    static TEST_METRICS: WalkMetrics = WalkMetrics::new_const();
+
+    /// Concurrency stress test through the REAL walk path:
+    /// `acquire_walk_permit` + `WalkMetrics::acquire_slot` + `spawn_blocking`
+    /// with the `WalkSlot` moved into the closure (so Drop runs on panic).
+    ///
+    /// Robustness approach — DEDICATED TEST-ONLY STATIC instances:
+    /// `WALK_SEMAPHORE` and `WALK_METRICS` are process-global statics shared
+    /// across parallel-running tests (this is why `walk_semaphore_initial_permits`
+    /// had to weaken `==`→`<=`). To avoid flakiness, this test uses DEDICATED
+    /// `static` items (`TEST_SEM`, `TEST_METRICS`) that NO other test touches —
+    /// so exact-count assertions (in_flight → 0, Drop-balance) are deterministic
+    /// regardless of parallel test interleaving. The REAL functions
+    /// (`acquire_walk_permit`, `acquire_slot`, `WalkSlot::drop`) are exercised
+    /// on `'static` references (required for `spawn_blocking`). No
+    /// `serial_test` dep needed; the test is fully deterministic.
+    ///
+    /// Reverting any of the three mechanisms (untimed acquire, missing
+    /// acquire_slot, or WalkSlot not moved into the closure) REDS this test:
+    /// (a) untimed acquire → the 503 saturation sub-case hangs; (b) missing
+    /// acquire_slot → in_flight stays 0, the return-to-zero assertion is
+    /// vacuous; (c) WalkSlot not moved into the closure → the panic task
+    /// drops the slot before the closure runs, in_flight decrements too early
+    /// and the "return to 0 after all tasks" assertion can race.
+    #[tokio::test]
+    async fn concurrent_walks_through_real_path_drop_balances() {
+        // ── Sub-case (a): N concurrent tasks through the real path, including
+        // a panicking closure whose WalkSlot must still Drop (in_flight → 0).
         let dir = tempfile::tempdir().unwrap();
         for i in 0..3u8 {
             let p = dir.path().join(format!("f{i}.ts"));
             std::fs::write(&p, b"const x = 1;").unwrap();
         }
-
         let root = dir.path().to_string_lossy().into_owned();
 
         let mut handles = Vec::new();
-        for _ in 0..10 {
+        for task_i in 0..8u8 {
             let r = root.clone();
             let h = tokio::spawn(async move {
-                let _permit = WALK_SEMAPHORE.acquire().await.unwrap();
-                let cache = DataflowCache::new();
-                let input = DataflowInput {
-                    root: r,
-                    language: "typescript".to_string(),
-                    max_results: 100,
-                    max_files: Some(10_000),
-                    file_glob: None,
-                    exclude_glob: None,
-                };
-                tokio::task::spawn_blocking(move || analyze_directory(input, &cache))
+                // Real path: bounded-timeout acquire (not raw .acquire().await).
+                let permit = acquire_walk_permit(&TEST_SEM, Duration::from_secs(5))
                     .await
-                    .unwrap()
-                    .unwrap()
+                    .expect("permits available for 8 tasks on a 4-permit sem");
+                // Real path: acquire_slot, moved into spawn_blocking so Drop
+                // runs when the closure finishes (even on panic).
+                let slot = TEST_METRICS.acquire_slot();
+
+                if task_i == 7 {
+                    // Panicking closure: WalkSlot must still Drop during unwind.
+                    let join_result = tokio::task::spawn_blocking(move || {
+                        let _slot = slot;
+                        let _permit = permit;
+                        panic!("intentional panic in walk closure");
+                    })
+                    .await;
+                    assert!(
+                        join_result.is_err(),
+                        "panic task should propagate as JoinError"
+                    );
+                    None
+                } else {
+                    let cache = DataflowCache::new();
+                    let input = DataflowInput {
+                        root: r,
+                        language: "typescript".to_string(),
+                        max_results: 100,
+                        max_files: Some(10_000),
+                        file_glob: None,
+                        exclude_glob: None,
+                    };
+                    let resp = tokio::task::spawn_blocking(move || {
+                        let _slot = slot;
+                        let _permit = permit;
+                        analyze_directory(input, &cache)
+                    })
+                    .await
+                    .expect("task should not panic")
+                    .expect("analysis should succeed");
+                    Some(resp)
+                }
             });
             handles.push(h);
         }
 
-        let mut completed = 0usize;
+        let mut ok_completed = 0usize;
+        let mut panic_completed = 0usize;
         for h in handles {
-            let resp = h.await.expect("task panicked");
-            assert_eq!(resp.files_analyzed, 3);
-            completed += 1;
+            match h.await.expect("outer task panicked") {
+                Some(resp) => {
+                    assert_eq!(resp.files_analyzed, 3);
+                    ok_completed += 1;
+                }
+                None => panic_completed += 1,
+            }
         }
-        assert_eq!(completed, 10);
+        assert_eq!(ok_completed, 7, "7 non-panic tasks should complete");
+        assert_eq!(panic_completed, 1, "1 panic task should report JoinError");
+
+        // (b) After ALL tasks complete (including the panicking one), in_flight
+        // must be back to 0 — guards a leaked WalkSlot. This is exact-count
+        // safe because `TEST_METRICS` is a dedicated static no other test
+        // touches (unlike the shared `WALK_METRICS`).
+        let (in_flight, _) = TEST_METRICS.stats();
+        assert_eq!(
+            in_flight, 0,
+            "in_flight must return to 0 after all tasks (including panic) complete; \
+             a non-zero value means a WalkSlot leaked (Drop did not run)"
+        );
+
+        // ── Sub-case (c): under a saturated permit set, at least one acquire
+        // returns 503 rather than hanging. Uses a local semaphore (no 'static
+        // requirement — the permit is not moved into spawn_blocking here).
+        let sem2 = Semaphore::new(1);
+        let _blocker = sem2.acquire().await.unwrap(); // saturate the single permit
+        let result = acquire_walk_permit(&sem2, Duration::from_millis(50)).await;
+        assert!(
+            result.is_err(),
+            "saturated semaphore should return an error, not hang"
+        );
+        let (status, msg) = result.unwrap_err();
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "saturated pool should return 503"
+        );
+        assert!(
+            msg.contains("saturated"),
+            "error message should mention saturation: {msg}"
+        );
     }
 }

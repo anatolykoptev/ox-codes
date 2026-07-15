@@ -280,6 +280,7 @@ Static dataflow analysis: dead stores, unused variables, constant-value propagat
   "root": "/path/to/repo",
   "language": "go",
   "max_results": 100,
+  "max_files": null,
   "file_glob": null,
   "exclude_glob": null
 }
@@ -289,9 +290,12 @@ Static dataflow analysis: dead stores, unused variables, constant-value propagat
 |---|---|---|---|
 | `root` | string | **required** | Directory to analyze |
 | `language` | string | **required** | `"go"` or `"python"` |
-| `max_results` | int | `100` | Cap on findings returned |
+| `max_results` | int | `100` | Cap on findings returned (server-side max `1000`) |
+| `max_files` | int | `null` | Cap on files walked; `null` → server-side max `10000` |
 | `file_glob` | string | `null` | Include-only glob |
 | `exclude_glob` | string | `null` | Exclude glob |
+
+**Server-side clamping**: `max_results` is clamped to `1000` and `max_files` is clamped to `10000` (an explicit `null` is treated as `10000`). Without this, a caller can request unbounded findings or force a full-repo walk on arbitrarily large repos.
 
 ### Response
 
@@ -315,6 +319,7 @@ Static dataflow analysis: dead stores, unused variables, constant-value propagat
   "total_findings": 1,
   "files_analyzed": 12,
   "truncated": false,
+  "files_truncated": false,
   "duration_ms": 230
 }
 ```
@@ -323,12 +328,27 @@ Finding `kind` values: `dead_store`, `unused_variable`, `constant_value`, `unini
 
 Finding `severity` values: `error`, `warning`, `info`.
 
+| Field | Type | Description |
+|---|---|---|
+| `findings` | array | Findings (capped at `max_results`) |
+| `total_findings` | int | Total findings before truncation |
+| `files_analyzed` | int | Number of files actually analyzed |
+| `truncated` | bool | `true` if `total_findings > max_results` (findings budget hit) |
+| `files_truncated` | bool | `true` if the walk was cut short by `max_files` (treat as a sample, not exhaustive) |
+| `duration_ms` | int | Wall-clock duration |
+
 ### Errors
 
 | Status | Condition |
 |---|---|
-| `400` | Unsupported language |
+| `400` | Unsupported language, bad request |
 | `500` | Internal spawn failure |
+| `503` | Walk pool saturated (all 8 permits held by in-flight walks); retry later |
+| `504` | Analysis exceeded the 25s hard deadline |
+
+### Cache
+
+Results are cached by a byte-weighed LRU (`moka`) keyed on repo root + language + globs + `max_results` + an aggregate file fingerprint (mtime + size per file). The default ceiling is **64 MB** of estimated response bytes (override via `OX_CODES_DATAFLOW_CACHE_BYTES`; `0` = disable). TTL defaults to 300s (override via `OX_CODES_DATAFLOW_CACHE_TTL_SECS`; `0` = no expiry). The legacy `OX_CODES_DATAFLOW_CACHE_ENTRIES` (entry-count cap) was renamed to `OX_CODES_DATAFLOW_CACHE_BYTES` (byte ceiling) — if only the old name is set, a warning is emitted and the byte default is used (the old numeric value is NOT reinterpreted as bytes).
 
 ---
 
@@ -413,6 +433,42 @@ Custom rule schema:
 |---|---|
 | `400` | Unsupported language, malformed rule |
 | `500` | Internal spawn failure |
+
+---
+
+## GET /cache/stats
+
+Per-cache effectiveness counters and walk-pool stats.
+
+### Response
+
+```json
+{
+  "scope": {
+    "hits": 42,
+    "misses": 7,
+    "entry_count": 5
+  },
+  "dataflow": {
+    "hits": 3,
+    "misses": 1,
+    "entry_count": 1
+  },
+  "walks": {
+    "in_flight": 1,
+    "oldest_start_ms": 1718467200000
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `scope.hits` / `scope.misses` | int | Scope cache counters |
+| `scope.entry_count` | int | Entries in the scope cache |
+| `dataflow.hits` / `dataflow.misses` | int | Dataflow result cache counters |
+| `dataflow.entry_count` | int | Entries in the dataflow cache |
+| `walks.in_flight` | int | Currently-active directory walks (permits held, max 8) |
+| `walks.oldest_start_ms` | int | UNIX-epoch ms of the oldest in-flight walk, or `0` if none. A walk whose age exceeds 25s is "stuck" (its permit will never be returned because `spawn_blocking` cannot be cancelled) — the operator should investigate before the pool exhausts and every request starts getting `503`. |
 
 ---
 
