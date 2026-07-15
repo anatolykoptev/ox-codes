@@ -1,4 +1,4 @@
-use super::walk_file;
+use super::{walk_file, walk_file_with_ext};
 
 #[test]
 fn go_basic_uses() {
@@ -171,6 +171,34 @@ fn svelte_parser_reused_across_expressions() {
     let chain = result.unwrap();
     let x = find_var(&chain, "x");
     assert!(x.is_some(), "x declared in script must be found");
+}
+
+// ---------------------------------------------------------------------------
+// TSX grammar selection (issue #44)
+// ---------------------------------------------------------------------------
+
+/// A `.tsx` file parsed with the non-JSX TypeScript grammar produces ERROR
+/// nodes wherever JSX appears, silently dropping any binding or reference
+/// inside (or downstream of) a JSX block.  Here `secret` is declared by a
+/// `const` and used inside a JSX expression container (`{secret}`).  With the
+/// TSX grammar the `secret` inside `{secret}` is an `identifier` node and is
+/// captured as a use; with the non-JSX grammar it is lost.
+#[test]
+fn tsx_jsx_reference_not_dropped() {
+    let src = br#"function App() {
+    const secret = getSecret();
+    return <div>{secret}</div>;
+}
+"#;
+    let chain = walk_file_with_ext(src, "typescript", "tsx").unwrap();
+    let secret = find_var(&chain, "secret");
+    assert!(secret.is_some(), "secret binding must be found");
+    let secret = secret.unwrap();
+    assert!(
+        !secret.uses.is_empty(),
+        "secret must have at least one use (inside JSX {{secret}}), got {} uses",
+        secret.uses.len()
+    );
 }
 
 // ---------------------------------------------------------------------------

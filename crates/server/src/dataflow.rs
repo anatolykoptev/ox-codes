@@ -269,7 +269,8 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
             Err(_) => continue,
         };
 
-        let chain = match scope_walker::walk_file(&source, &input.language) {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let chain = match scope_walker::walk_file_with_ext(&source, &input.language, ext) {
             Ok(c) => c,
             Err(_) => continue,
         };

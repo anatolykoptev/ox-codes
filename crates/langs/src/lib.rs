@@ -41,6 +41,7 @@ pub fn get_language(name: &str) -> Option<LangConfig> {
         "rust" => Some(rust_lang::config()),
         "python" => Some(python::config()),
         "typescript" => Some(typescript::config()),
+        "tsx" => Some(typescript::config_tsx()),
         "svelte" => Some(svelte::config()),
         "java" => Some(java::config()),
         "c" => Some(c::config()),
@@ -67,6 +68,7 @@ pub fn language_id(name: &str) -> Option<&'static str> {
         "rust" | "rs" => Some("rust"),
         "python" | "py" => Some("python"),
         "typescript" | "ts" | "javascript" | "js" => Some("typescript"),
+        "tsx" | "jsx" => Some("tsx"),
         "svelte" => Some("svelte"),
         "java" => Some("java"),
         "c" => Some("c"),
@@ -90,6 +92,7 @@ pub fn get_scope_query(name: &str, scope: ScopeKind) -> Option<&'static str> {
         "rust" => Some(rust_lang::scope_query(scope)),
         "python" => Some(python::scope_query(scope)),
         "typescript" => Some(typescript::scope_query(scope)),
+        "tsx" => Some(typescript::scope_query(scope)),
         "svelte" => Some(svelte::scope_query(scope)),
         "java" => Some(java::scope_query(scope)),
         "c" => Some(c::scope_query(scope)),
@@ -139,6 +142,7 @@ mod tests {
         "rust",
         "python",
         "typescript",
+        "tsx",
         "svelte",
         "java",
         "c",
@@ -174,6 +178,8 @@ mod tests {
         assert!(get_language("py").is_some());
         assert!(get_language("ts").is_some());
         assert!(get_language("js").is_some());
+        assert!(get_language("tsx").is_some());
+        assert!(get_language("jsx").is_some());
         assert!(get_language("java").is_some());
         assert!(get_language("c").is_some());
         assert!(get_language("cpp").is_some());
@@ -197,6 +203,21 @@ mod tests {
     fn test_get_language_svelte() {
         let cfg = get_language("svelte").unwrap();
         assert_eq!(cfg.extensions, &["svelte"]);
+    }
+
+    #[test]
+    fn test_get_language_tsx() {
+        let cfg = get_language("tsx").unwrap();
+        assert_eq!(cfg.extensions, &["tsx", "jsx"]);
+    }
+
+    #[test]
+    fn test_language_id_tsx() {
+        assert_eq!(language_id("tsx"), Some("tsx"));
+        assert_eq!(language_id("jsx"), Some("tsx"));
+        // ts/js still resolve to "typescript", not "tsx"
+        assert_eq!(language_id("ts"), Some("typescript"));
+        assert_eq!(language_id("js"), Some("typescript"));
     }
 
     #[test]

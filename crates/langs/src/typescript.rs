@@ -7,6 +7,14 @@ pub fn config() -> LangConfig {
     }
 }
 
+/// Config for the JSX-aware TSX grammar (`.tsx`/`.jsx` files).
+pub fn config_tsx() -> LangConfig {
+    LangConfig {
+        language: tree_sitter_typescript::LANGUAGE_TSX.into(),
+        extensions: &["tsx", "jsx"],
+    }
+}
+
 pub fn scope_query(scope: ScopeKind) -> &'static str {
     match scope {
         ScopeKind::FunctionBodies => {

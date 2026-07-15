@@ -6,10 +6,33 @@ use crate::queries;
 use crate::types::{ConstValue, Scope, ScopeChain, ScopeKind, Span, VarBinding};
 
 /// Walk a source file and build a scope chain with variable bindings.
+///
+/// Delegates to [`walk_file_with_ext`] with an empty extension — callers that
+/// know the file extension (and thus whether to use the TSX grammar for
+/// `.tsx`/`.jsx`) should call that directly.
 pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
+    walk_file_with_ext(source, lang_name, "")
+}
+
+/// Walk a source file and build a scope chain with variable bindings.
+///
+/// `file_ext` (without leading dot, e.g. `"tsx"`) is used to select the
+/// tree-sitter grammar for the TypeScript family: `.tsx`/`.jsx` files are
+/// parsed with `LANGUAGE_TSX` (the JSX-aware grammar) instead of the
+/// non-JSX `LANGUAGE_TYPESCRIPT`, which produces `ERROR` nodes on JSX and
+/// silently drops bindings/refs in or after JSX blocks.
+pub fn walk_file_with_ext(source: &[u8], lang_name: &str, file_ext: &str) -> Result<ScopeChain> {
     let lq = queries::get_queries(lang_name)
         .with_context(|| format!("unsupported language: {lang_name}"))?;
-    let lang = lq.language().clone();
+    // For the TypeScript family, .tsx/.jsx files must use the JSX-aware TSX
+    // grammar; the non-JSX LANGUAGE_TYPESCRIPT produces ERROR nodes on JSX,
+    // silently dropping bindings/refs in or after JSX blocks.  Mirrors the
+    // LANGUAGE_TSX dispatch in structural.rs:109-112.
+    let lang: tree_sitter::Language = if is_tsx_grammar(lang_name, file_ext) {
+        tree_sitter_typescript::LANGUAGE_TSX.into()
+    } else {
+        lq.language().clone()
+    };
     let mut parser = Parser::new();
     parser.set_language(&lang)?;
     let tree = parser.parse(source, None).context("parse failed")?;
@@ -63,6 +86,18 @@ pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
     Ok(ScopeChain {
         scopes: ctx.finished,
     })
+}
+
+/// Whether the TSX (JSX-aware) grammar should be used for the given language
+/// name and file extension.  An explicit `"tsx"`/`"jsx"` language name always
+/// selects TSX; for the broader TypeScript family (`typescript`/`ts`/`js`)
+/// the file extension decides — `.tsx`/`.jsx` → TSX, `.ts`/`.js` → non-JSX.
+fn is_tsx_grammar(lang_name: &str, file_ext: &str) -> bool {
+    if matches!(lang_name, "tsx" | "jsx") {
+        return true;
+    }
+    matches!(lang_name, "typescript" | "ts" | "javascript" | "js")
+        && matches!(file_ext, "tsx" | "jsx")
 }
 
 /// Build CompiledQueries for TypeScript (used for Svelte secondary parses).
