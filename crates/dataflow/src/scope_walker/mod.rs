@@ -48,9 +48,15 @@ pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
         is_ts_secondary: false,
         ts_parser,
         span_offset: 0,
+        pending_refs: Vec::new(),
     };
     let mut stack = vec![make_scope(ScopeKind::Module, tree.root_node(), 0)];
     walk_node(tree.root_node(), source, &compiled, &mut stack, &mut ctx);
+    // Resolve deferred references (Svelte template refs processed before the
+    // <script> block's declarations entered scope) against the final scope
+    // stack. Only still-open (enclosing) scopes are searched, so refs to
+    // already-popped function-local bindings are NOT falsely resolved.
+    resolve_pending_refs(&ctx.pending_refs, &mut stack);
     while let Some(s) = stack.pop() {
         ctx.finished.push(s);
     }
@@ -115,6 +121,17 @@ struct WalkCtx {
     /// Byte offset to add to all spans during a secondary-parse walk.
     /// Equals child.start_byte() in the original Svelte source.
     span_offset: usize,
+    /// References whose target binding was not yet in scope when encountered
+    /// (Svelte template refs processed before the `<script>` block). Resolved
+    /// against the final scope stack after the walk completes.
+    pending_refs: Vec<PendingRef>,
+}
+
+/// A reference deferred because its target wasn't in scope yet at the point
+/// the reference was walked (Svelte script-after-template ordering).
+struct PendingRef {
+    name: String,
+    span: Span,
 }
 
 fn walk_node(
@@ -196,7 +213,7 @@ fn walk_node(
             // Bind the function name to the enclosing scope (not the function's own scope).
             bind_func_name(node, src, stack, &mut ctx.sid, ctx.span_offset);
         } else if node.child_count() == 0 && kind == "identifier" {
-            record_reference(node, src, stack, ctx.span_offset);
+            record_reference(node, src, stack, ctx);
         }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -331,7 +348,7 @@ fn walk_svelte_attribute(
                 // If no expression: the directive name itself IS the identifier
                 // (e.g. `use:drag` with no `={...}`) — record it as a reference.
                 if expressions.is_empty() {
-                    record_name_as_reference(&directive.name, node, src, stack);
+                    record_name_as_reference(&directive.name, node, src, stack, ctx);
                 }
             }
             DirectiveKind::Class | DirectiveKind::Style | DirectiveKind::Unknown => {
@@ -426,7 +443,13 @@ fn walk_svelte_raw_text_children(
 }
 
 /// Synthesize a zero-span reference from a plain name string.
-fn record_name_as_reference(name: &str, node: Node, _src: &[u8], stack: &mut [Scope]) {
+fn record_name_as_reference(
+    name: &str,
+    node: Node,
+    _src: &[u8],
+    stack: &mut [Scope],
+    ctx: &mut WalkCtx,
+) {
     let span = node_span(node, 0);
     for scope in stack.iter_mut().rev() {
         if let Some(b) = scope.vars.iter_mut().rev().find(|v| v.name == name) {
@@ -435,6 +458,14 @@ fn record_name_as_reference(name: &str, node: Node, _src: &[u8], stack: &mut [Sc
             }
             return;
         }
+    }
+    // Target not yet in scope — defer if we're in a Svelte context (the
+    // <script> block may not have been walked yet).
+    if ctx.is_svelte || ctx.is_ts_secondary {
+        ctx.pending_refs.push(PendingRef {
+            name: name.to_string(),
+            span,
+        });
     }
 }
 
@@ -615,15 +646,37 @@ fn collect_bindings(
     }
 }
 
-fn record_reference(node: Node, src: &[u8], stack: &mut [Scope], offset: usize) {
+fn record_reference(node: Node, src: &[u8], stack: &mut [Scope], ctx: &mut WalkCtx) {
     let name = text_of(node, src);
-    let span = node_span(node, offset);
+    let span = node_span(node, ctx.span_offset);
     for scope in stack.iter_mut().rev() {
         if let Some(b) = scope.vars.iter_mut().rev().find(|v| v.name == name) {
             if b.def_site.start_byte != span.start_byte {
                 b.uses.push(span);
             }
             return;
+        }
+    }
+    // Target not yet in scope — defer if we're in a Svelte context (the
+    // <script> block may not have been walked yet).
+    if ctx.is_svelte || ctx.is_ts_secondary {
+        ctx.pending_refs.push(PendingRef { name, span });
+    }
+}
+
+/// Resolve deferred references against the final scope stack (the still-open
+/// enclosing scopes). Called after `walk_node` completes, before the stack is
+/// drained into `finished`. Only enclosing scopes are searched, so a ref to an
+/// already-popped function-local binding is NOT falsely resolved.
+fn resolve_pending_refs(pending: &[PendingRef], stack: &mut [Scope]) {
+    for pref in pending {
+        for scope in stack.iter_mut().rev() {
+            if let Some(b) = scope.vars.iter_mut().rev().find(|v| v.name == pref.name) {
+                if b.def_site.start_byte != pref.span.start_byte {
+                    b.uses.push(pref.span);
+                }
+                break;
+            }
         }
     }
 }

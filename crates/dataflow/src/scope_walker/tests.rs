@@ -142,7 +142,6 @@ fn svelte_span_offsets_are_relative_to_file() {
 ///
 /// Tracked as: feat/svelte-two-pass-ordering followup.
 #[test]
-#[ignore = "known failing: script-after-template ordering not yet implemented (two-pass needed)"]
 fn svelte_script_after_template() {
     let src = b"<button on:click={fn}></button><script>function fn(){}</script>";
     let chain = walk_file(src, "svelte").unwrap();
