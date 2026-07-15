@@ -6,10 +6,32 @@ use crate::queries;
 use crate::types::{ConstValue, Scope, ScopeChain, ScopeKind, Span, VarBinding};
 
 /// Walk a source file and build a scope chain with variable bindings.
+///
+/// Delegates to [`walk_file_with_ext`] with an empty extension — callers that
+/// know the file extension (and thus whether to use the TSX grammar for
+/// `.tsx`/`.jsx`) should call that directly.
 pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
+    walk_file_with_ext(source, lang_name, "")
+}
+
+/// Walk a source file and build a scope chain with variable bindings.
+///
+/// `file_ext` (without leading dot, e.g. `"tsx"`) is used to select the
+/// tree-sitter grammar for the TypeScript family: `.tsx`/`.jsx` files are
+/// parsed with `LANGUAGE_TSX` (the JSX-aware grammar) instead of the
+/// non-JSX `LANGUAGE_TYPESCRIPT`, which produces `ERROR` nodes on JSX and
+/// silently drops bindings/refs in or after JSX blocks.
+pub fn walk_file_with_ext(source: &[u8], lang_name: &str, file_ext: &str) -> Result<ScopeChain> {
     let lq = queries::get_queries(lang_name)
         .with_context(|| format!("unsupported language: {lang_name}"))?;
-    let lang = lq.language().clone();
+    // For the TypeScript family, .tsx/.jsx files must use the JSX-aware TSX
+    // grammar; the non-JSX LANGUAGE_TYPESCRIPT produces ERROR nodes on JSX,
+    // silently dropping bindings/refs in or after JSX blocks.  Grammar
+    // selection goes through ox_langs::effective_language_id + get_language
+    // (the single source of truth) instead of an inline LANGUAGE_TSX literal.
+    let lang: tree_sitter::Language = ox_langs::effective_language_id(lang_name, file_ext)
+        .and_then(|id| ox_langs::get_language(id).map(|c| c.language))
+        .unwrap_or_else(|| lq.language().clone());
     let mut parser = Parser::new();
     parser.set_language(&lang)?;
     let tree = parser.parse(source, None).context("parse failed")?;
@@ -97,12 +119,13 @@ fn walk_as_typescript(
     // Walk the secondary tree; mark as non-svelte so we use compiled TS queries.
     let saved_svelte = ctx.is_svelte;
     let saved_offset = ctx.span_offset;
+    let saved_ts_secondary = ctx.is_ts_secondary;
     ctx.is_svelte = false;
     ctx.is_ts_secondary = true;
     ctx.span_offset = offset;
     walk_node(tree.root_node(), raw, q, stack, ctx);
     ctx.is_svelte = saved_svelte;
-    ctx.is_ts_secondary = false;
+    ctx.is_ts_secondary = saved_ts_secondary;
     ctx.span_offset = saved_offset;
 }
 
