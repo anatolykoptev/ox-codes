@@ -67,7 +67,6 @@ All search endpoints support `expand` (`"none"` / `"function"` / `"block"`) and 
 - **[`docs/EXAMPLES.md`](docs/EXAMPLES.md)** — end-to-end usage scenarios: auth-function discovery, error-pattern refactor, unused-variable sweep, taint trace.
 - **[`docs/INTEGRATION.md`](docs/INTEGRATION.md)** — consumer contract: filesystem mount conventions, path pitfalls, Docker volume wiring.
 - **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — phase status; what is done and what is next.
-- **[`docs/architecture/`](docs/architecture/)** — LikeC4 architecture diagrams.
 
 ## Languages supported
 
