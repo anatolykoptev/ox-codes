@@ -113,7 +113,7 @@ pub struct Finding {
 pub const DEFAULT_MAX_FILES: usize = 2000;
 
 /// Request for dataflow analysis.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct DataflowInput {
     pub root: String,
     pub language: String,
@@ -129,7 +129,7 @@ pub struct DataflowInput {
 }
 
 /// Response from dataflow analysis.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DataflowResponse {
     pub findings: Vec<Finding>,
     pub total_findings: usize,

@@ -1,15 +1,21 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::Result;
 use axum::Json;
+use axum::extract::State;
 use axum::http::StatusCode;
+use globset::GlobSet;
 use ignore::WalkBuilder;
 use tokio::sync::Semaphore;
 
 use ox_core::grep_filter::build_globset;
 use ox_dataflow::{DataflowInput, DataflowResponse, Finding, analysis, scope_walker};
 use ox_langs::get_language;
+
+use crate::dataflow_cache::{DataflowCache, DataflowCacheKey};
 
 /// Hard deadline for a single dataflow request. Note: `spawn_blocking` cannot
 /// be cancelled — the task continues running in the blocking thread pool after
@@ -26,6 +32,7 @@ const SEMAPHORE_PERMITS: usize = 8;
 static WALK_SEMAPHORE: Semaphore = Semaphore::const_new(SEMAPHORE_PERMITS);
 
 pub async fn handle(
+    State(state): State<crate::AppState>,
     Json(input): Json<DataflowInput>,
 ) -> Result<Json<DataflowResponse>, (StatusCode, String)> {
     // Acquire a walk permit BEFORE spawning the blocking task. If all permits
@@ -42,7 +49,8 @@ pub async fn handle(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let task = tokio::task::spawn_blocking(move || analyze_directory(input));
+    let dataflow_cache = state.dataflow_cache.clone();
+    let task = tokio::task::spawn_blocking(move || analyze_directory(input, &dataflow_cache));
 
     let result = tokio::time::timeout(Duration::from_secs(DATAFLOW_TIMEOUT_SECS), task)
         .await
@@ -58,7 +66,115 @@ pub async fn handle(
     Ok(Json(result))
 }
 
-fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
+fn analyze_directory(input: DataflowInput, cache: &DataflowCache) -> Result<DataflowResponse> {
+    let mut input = input;
+    let canonical_root = match std::fs::canonicalize(&input.root) {
+        Ok(p) => p,
+        // Canonicalization failed: preserve the cache-cold path and skip caching.
+        Err(_) => return analyze_uncached(input),
+    };
+    input.root = canonical_root.to_string_lossy().into_owned();
+
+    let key = match build_key(&input, &canonical_root) {
+        Ok(k) => k,
+        // Key construction failed (e.g. unsupported language or bad glob):
+        // fall back to the cache-cold path.
+        Err(_) => return analyze_uncached(input),
+    };
+
+    let response = cache.get_or_insert(key, move || Ok(Arc::new(analyze_uncached(input)?)))?;
+    Ok((*response).clone())
+}
+
+fn build_key(input: &DataflowInput, canonical_root: &Path) -> Result<DataflowCacheKey> {
+    let lang_cfg = get_language(&input.language)
+        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
+    let include = input.file_glob.as_deref().map(build_globset).transpose()?;
+    let exclude = input
+        .exclude_glob
+        .as_deref()
+        .map(build_globset)
+        .transpose()?;
+
+    let aggregate_fingerprint = compute_fingerprint(
+        canonical_root,
+        &lang_cfg,
+        include.as_ref(),
+        exclude.as_ref(),
+        input.max_files,
+    )?;
+
+    Ok(DataflowCacheKey {
+        canonical_root: canonical_root.to_path_buf(),
+        language: input.language.clone(),
+        file_glob: input.file_glob.clone(),
+        exclude_glob: input.exclude_glob.clone(),
+        max_results: input.max_results,
+        aggregate_fingerprint,
+    })
+}
+
+fn compute_fingerprint(
+    root: &Path,
+    lang_cfg: &ox_langs::LangConfig,
+    include: Option<&GlobSet>,
+    exclude: Option<&GlobSet>,
+    max_files: Option<usize>,
+) -> Result<u64> {
+    let mut hasher = DefaultHasher::new();
+    let mut count = 0;
+
+    for entry in WalkBuilder::new(root)
+        .standard_filters(true)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+    {
+        if max_files.is_some_and(|cap| count >= cap) {
+            break;
+        }
+
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !lang_cfg.extensions.contains(&ext) {
+            continue;
+        }
+
+        let rel_path = path.strip_prefix(root).unwrap_or(path);
+        if let Some(inc) = include
+            && !inc.is_match(rel_path)
+        {
+            continue;
+        }
+        if let Some(exc) = exclude
+            && exc.is_match(rel_path)
+        {
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mtime_nanos = metadata
+            .modified()
+            .unwrap_or(UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let file_len = metadata.len();
+
+        let rel_str = rel_path.to_string_lossy();
+        rel_str.as_bytes().hash(&mut hasher);
+        mtime_nanos.hash(&mut hasher);
+        file_len.hash(&mut hasher);
+        count += 1;
+    }
+
+    Ok(hasher.finish())
+}
+
+fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
     let start = Instant::now();
 
     let lang_cfg = get_language(&input.language)
@@ -147,6 +263,7 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataflow_cache::DataflowCache;
     use ox_dataflow::DataflowInput;
     use tempfile::tempdir;
 
@@ -170,7 +287,8 @@ mod tests {
             exclude_glob: None,
         };
 
-        let result = analyze_directory(input).unwrap();
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
         assert_eq!(
             result.files_analyzed, 3,
             "expected exactly 3 files, got {}",
@@ -200,7 +318,8 @@ mod tests {
             exclude_glob: None,
         };
 
-        let result = analyze_directory(input).unwrap();
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
         assert_eq!(result.files_analyzed, 5);
     }
 
@@ -227,18 +346,174 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let result = analyze_directory(input).unwrap();
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
         assert!(
             result.files_analyzed >= 1,
             "svelte file should not be skipped; files_analyzed={}",
             result.files_analyzed
         );
     }
+
+    /// Verifies the cache hit contract: first call is a miss + one analysis,
+    /// second call on the same repo is a hit + zero additional analyses.
+    #[test]
+    fn test_dataflow_cache_hit_contract() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::with_capacity(64);
+
+        let r1 = analyze_directory(input.clone(), &cache).unwrap();
+        let (h1, m1, a1) = cache.stats();
+        assert_eq!(m1, 1, "first call should be a miss");
+        assert_eq!(a1, 1, "first call should run one analysis");
+        assert_eq!(h1, 0, "first call should have no hits");
+
+        let r2 = analyze_directory(input, &cache).unwrap();
+        let (h2, m2, a2) = cache.stats();
+        assert_eq!(h2, 1, "second call should be a hit");
+        assert_eq!(m2, 1, "second call should have no additional misses");
+        assert_eq!(a2, 1, "second call should run no additional analyses");
+
+        let mut r1 = r1;
+        r1.duration_ms = 0;
+        let mut r2 = r2;
+        r2.duration_ms = 0;
+        assert_eq!(
+            serde_json::to_value(&r1).unwrap(),
+            serde_json::to_value(&r2).unwrap(),
+            "warm result must equal cold result"
+        );
+    }
+
+    /// Verifies cache invalidation: modifying a file changes the aggregate
+    /// fingerprint and causes a re-analysis.
+    #[test]
+    fn test_dataflow_cache_invalidation() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::with_capacity(64);
+
+        let r1 = analyze_directory(input.clone(), &cache).unwrap();
+        let (_h1, m1, a1) = cache.stats();
+        assert_eq!(m1, 1, "first call should be a miss");
+        assert_eq!(a1, 1);
+
+        let r2 = analyze_directory(input.clone(), &cache).unwrap();
+        let (h2, m2, a2) = cache.stats();
+        assert_eq!(h2, 1, "second call should be a hit");
+        assert_eq!(m2, 1);
+        assert_eq!(a2, 1);
+
+        let mut r1 = r1;
+        r1.duration_ms = 0;
+        let mut r2 = r2;
+        r2.duration_ms = 0;
+        assert_eq!(
+            serde_json::to_value(&r1).unwrap(),
+            serde_json::to_value(&r2).unwrap()
+        );
+
+        // Append a byte to one file, changing mtime + len.
+        let a_path = dir.path().join("file0.ts");
+        let mut content = std::fs::read_to_string(&a_path).unwrap();
+        content.push_str("\nconst y = 2;\n");
+        std::fs::write(&a_path, content).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let r3 = analyze_directory(input, &cache).unwrap();
+        let (h3, m3, a3) = cache.stats();
+        assert_eq!(m3, 2, "modified file should be a miss");
+        assert_eq!(h3, 1, "previous calls should still be hits");
+        assert_eq!(a3, 2, "modified file should trigger re-analysis");
+
+        let mut r3 = r3;
+        r3.duration_ms = 0;
+        assert_ne!(
+            serde_json::to_value(&r2).unwrap(),
+            serde_json::to_value(&r3).unwrap(),
+            "modified repo should produce a different result"
+        );
+    }
+
+    /// Verifies that a cached response is byte-identical to the uncached one.
+    #[test]
+    fn test_dataflow_cache_result_equivalence() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::with_capacity(64);
+
+        let cold = analyze_directory(input.clone(), &DataflowCache::new()).unwrap();
+        let warm1 = analyze_directory(input.clone(), &cache).unwrap();
+        let warm2 = analyze_directory(input, &cache).unwrap();
+
+        let mut cold = cold;
+        cold.duration_ms = 0;
+        let mut warm1 = warm1;
+        warm1.duration_ms = 0;
+        let mut warm2 = warm2;
+        warm2.duration_ms = 0;
+        assert_eq!(
+            serde_json::to_value(&cold).unwrap(),
+            serde_json::to_value(&warm1).unwrap(),
+            "first warm result must equal cold result"
+        );
+        assert_eq!(
+            serde_json::to_value(&warm1).unwrap(),
+            serde_json::to_value(&warm2).unwrap(),
+            "second warm result must equal the cached one"
+        );
+
+        let (hits, misses, analyses) = cache.stats();
+        assert_eq!(misses, 1, "shared cache should have exactly one miss");
+        assert_eq!(hits, 1, "second shared-cache call should be a hit");
+        assert_eq!(analyses, 1, "only one analysis should run");
+    }
 }
 
 #[cfg(test)]
 mod semaphore_tests {
     use super::*;
+    use crate::dataflow_cache::DataflowCache;
 
     /// Verify the semaphore constant matches the design doc value (8 = 2x 4 ARM cores).
     #[test]
@@ -269,6 +544,7 @@ mod semaphore_tests {
             let r = root.clone();
             let h = tokio::spawn(async move {
                 let _permit = WALK_SEMAPHORE.acquire().await.unwrap();
+                let cache = DataflowCache::new();
                 let input = DataflowInput {
                     root: r,
                     language: "typescript".to_string(),
@@ -277,7 +553,7 @@ mod semaphore_tests {
                     file_glob: None,
                     exclude_glob: None,
                 };
-                tokio::task::spawn_blocking(move || analyze_directory(input))
+                tokio::task::spawn_blocking(move || analyze_directory(input, &cache))
                     .await
                     .unwrap()
                     .unwrap()
