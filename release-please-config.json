@@ -6,7 +6,7 @@
   "include-v-in-tag": true,
   "packages": {
     ".": {
-      "release-type": "simple",
+      "release-type": "rust",
       "package-name": "ox-codes",
       "changelog-sections": [
         { "type": "feat",     "section": "Added" },
