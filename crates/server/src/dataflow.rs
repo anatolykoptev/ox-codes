@@ -1,15 +1,21 @@
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::Result;
 use axum::Json;
+use axum::extract::State;
 use axum::http::StatusCode;
+use globset::GlobSet;
 use ignore::WalkBuilder;
 use tokio::sync::Semaphore;
 
 use ox_core::grep_filter::build_globset;
 use ox_dataflow::{DataflowInput, DataflowResponse, Finding, analysis, scope_walker};
 use ox_langs::get_language;
+
+use crate::dataflow_cache::{DataflowCache, DataflowCacheKey};
 
 /// Hard deadline for a single dataflow request. Note: `spawn_blocking` cannot
 /// be cancelled — the task continues running in the blocking thread pool after
@@ -26,6 +32,7 @@ const SEMAPHORE_PERMITS: usize = 8;
 static WALK_SEMAPHORE: Semaphore = Semaphore::const_new(SEMAPHORE_PERMITS);
 
 pub async fn handle(
+    State(state): State<crate::AppState>,
     Json(input): Json<DataflowInput>,
 ) -> Result<Json<DataflowResponse>, (StatusCode, String)> {
     // Acquire a walk permit BEFORE spawning the blocking task. If all permits
@@ -42,7 +49,8 @@ pub async fn handle(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let task = tokio::task::spawn_blocking(move || analyze_directory(input));
+    let dataflow_cache = state.dataflow_cache.clone();
+    let task = tokio::task::spawn_blocking(move || analyze_directory(input, &dataflow_cache));
 
     let result = tokio::time::timeout(Duration::from_secs(DATAFLOW_TIMEOUT_SECS), task)
         .await
@@ -58,7 +66,171 @@ pub async fn handle(
     Ok(Json(result))
 }
 
-fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
+fn analyze_directory(input: DataflowInput, cache: &DataflowCache) -> Result<DataflowResponse> {
+    let mut input = input;
+    let canonical_root = match std::fs::canonicalize(&input.root) {
+        Ok(p) => p,
+        // Canonicalization failed: preserve the cache-cold path and skip caching.
+        Err(_) => return analyze_uncached(input),
+    };
+    input.root = canonical_root.to_string_lossy().into_owned();
+
+    let key = match build_key(&input, &canonical_root) {
+        Ok(k) => k,
+        // Key construction failed (e.g. unsupported language or bad glob):
+        // fall back to the cache-cold path.
+        Err(_) => return analyze_uncached(input),
+    };
+
+    let response = cache.get_or_insert(key, move || Ok(Arc::new(analyze_uncached(input)?)))?;
+    Ok((*response).clone())
+}
+
+fn build_key(input: &DataflowInput, canonical_root: &Path) -> Result<DataflowCacheKey> {
+    let lang_cfg = get_language(&input.language)
+        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
+    let include = input.file_glob.as_deref().map(build_globset).transpose()?;
+    let exclude = input
+        .exclude_glob
+        .as_deref()
+        .map(build_globset)
+        .transpose()?;
+
+    let aggregate_fingerprint = compute_fingerprint(
+        canonical_root,
+        &lang_cfg,
+        include.as_ref(),
+        exclude.as_ref(),
+        input.max_files,
+    )?;
+
+    Ok(DataflowCacheKey {
+        canonical_root: canonical_root.to_path_buf(),
+        language: input.language.clone(),
+        file_glob: input.file_glob.clone(),
+        exclude_glob: input.exclude_glob.clone(),
+        max_results: input.max_results,
+        aggregate_fingerprint,
+    })
+}
+
+struct FilteredWalk<'a> {
+    walk: ignore::Walk,
+    root: &'a Path,
+    lang_cfg: &'a ox_langs::LangConfig,
+    include: Option<&'a GlobSet>,
+    exclude: Option<&'a GlobSet>,
+    max_files: Option<usize>,
+    count: usize,
+    truncated: bool,
+}
+
+impl<'a> FilteredWalk<'a> {
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+impl Iterator for FilteredWalk<'_> {
+    type Item = (PathBuf, String, std::fs::Metadata);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.max_files.is_some_and(|cap| self.count >= cap) {
+            self.truncated = true;
+            return None;
+        }
+
+        for result in self.walk.by_ref() {
+            let entry = result.ok()?;
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+
+            let path = entry.path().to_path_buf();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !self.lang_cfg.extensions.contains(&ext) {
+                continue;
+            }
+
+            let rel_path = path.strip_prefix(self.root).unwrap_or(&path);
+            if let Some(inc) = self.include
+                && !inc.is_match(rel_path)
+            {
+                continue;
+            }
+            if let Some(exc) = self.exclude
+                && exc.is_match(rel_path)
+            {
+                continue;
+            }
+
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            if self.max_files.is_some_and(|cap| self.count >= cap) {
+                self.truncated = true;
+                return None;
+            }
+
+            self.count += 1;
+            let rel_str = rel_path.to_string_lossy().into_owned();
+            return Some((path, rel_str, metadata));
+        }
+
+        None
+    }
+}
+
+fn filtered_walk<'a>(
+    root: &'a Path,
+    lang_cfg: &'a ox_langs::LangConfig,
+    include: Option<&'a GlobSet>,
+    exclude: Option<&'a GlobSet>,
+    max_files: Option<usize>,
+) -> FilteredWalk<'a> {
+    FilteredWalk {
+        walk: WalkBuilder::new(root).standard_filters(true).build(),
+        root,
+        lang_cfg,
+        include,
+        exclude,
+        max_files,
+        count: 0,
+        truncated: false,
+    }
+}
+
+fn compute_fingerprint(
+    root: &Path,
+    lang_cfg: &ox_langs::LangConfig,
+    include: Option<&GlobSet>,
+    exclude: Option<&GlobSet>,
+    max_files: Option<usize>,
+) -> Result<u64> {
+    let mut aggregate: u64 = 0;
+
+    for (_path, rel, metadata) in filtered_walk(root, lang_cfg, include, exclude, max_files) {
+        let mtime_nanos = metadata
+            .modified()
+            .unwrap_or(UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let file_len = metadata.len();
+
+        let mut hasher = DefaultHasher::new();
+        rel.as_bytes().hash(&mut hasher);
+        mtime_nanos.hash(&mut hasher);
+        file_len.hash(&mut hasher);
+        aggregate ^= hasher.finish();
+    }
+
+    Ok(aggregate)
+}
+
+fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
     let start = Instant::now();
 
     let lang_cfg = get_language(&input.language)
@@ -75,40 +247,15 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut files_analyzed: usize = 0;
 
-    let mut files_truncated = false;
-    for entry in WalkBuilder::new(root)
-        .standard_filters(true)
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-    {
-        // File cap: stop walking once limit is reached.
-        if let Some(cap) = input.max_files
-            && files_analyzed >= cap
-        {
-            files_truncated = true;
-            break;
-        }
-
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !lang_cfg.extensions.contains(&ext) {
-            continue;
-        }
-
-        let rel_path = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include
-            && !inc.is_match(rel_path)
-        {
-            continue;
-        }
-        if let Some(ref exc) = exclude
-            && exc.is_match(rel_path)
-        {
-            continue;
-        }
-
-        let source = match std::fs::read(path) {
+    let mut walk = filtered_walk(
+        root,
+        &lang_cfg,
+        include.as_ref(),
+        exclude.as_ref(),
+        input.max_files,
+    );
+    for (path, rel, _metadata) in walk.by_ref() {
+        let source = match std::fs::read(&path) {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -118,8 +265,7 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
             Err(_) => continue,
         };
 
-        let rel_str = rel_path.to_string_lossy();
-        let findings = analysis::analyze(&chain, &rel_str);
+        let findings = analysis::analyze(&chain, &rel);
         all_findings.extend(findings);
         files_analyzed += 1;
 
@@ -127,6 +273,7 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
             break;
         }
     }
+    let files_truncated = walk.truncated();
 
     let total = all_findings.len();
     let truncated = total > input.max_results;
@@ -147,6 +294,7 @@ fn analyze_directory(input: DataflowInput) -> Result<DataflowResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataflow_cache::DataflowCache;
     use ox_dataflow::DataflowInput;
     use tempfile::tempdir;
 
@@ -170,7 +318,8 @@ mod tests {
             exclude_glob: None,
         };
 
-        let result = analyze_directory(input).unwrap();
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
         assert_eq!(
             result.files_analyzed, 3,
             "expected exactly 3 files, got {}",
@@ -200,7 +349,8 @@ mod tests {
             exclude_glob: None,
         };
 
-        let result = analyze_directory(input).unwrap();
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
         assert_eq!(result.files_analyzed, 5);
     }
 
@@ -227,18 +377,232 @@ function leaks() {
             exclude_glob: None,
         };
 
-        let result = analyze_directory(input).unwrap();
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
         assert!(
             result.files_analyzed >= 1,
             "svelte file should not be skipped; files_analyzed={}",
             result.files_analyzed
         );
     }
+
+    /// Regression test for the cap-counting divergence between fingerprint and
+    /// analysis. An unreadable middle file must still count toward the max_files
+    /// cap so the shared filtered walk cuts both callers at the same file.
+    #[cfg(unix)]
+    #[test]
+    fn test_filtered_walk_counts_read_failures_toward_cap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("file1.ts");
+        let f2 = dir.path().join("file2.ts");
+        let f3 = dir.path().join("file3.ts");
+        std::fs::write(&f1, b"const x = 1;").unwrap();
+        std::fs::write(&f2, b"const y = 2;").unwrap();
+        std::fs::write(&f3, b"const z = 3;").unwrap();
+
+        std::fs::set_permissions(&f2, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // If reading the file still succeeds, the test is running in an
+        // environment (e.g. as root) where permissions cannot be dropped.
+        if std::fs::read(&f2).is_ok() {
+            std::fs::set_permissions(&f2, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+
+        let lang_cfg = get_language("typescript").unwrap();
+        let root = dir.path();
+        let mut walk = filtered_walk(root, &lang_cfg, None, None, Some(2));
+        let paths: Vec<_> = walk.by_ref().map(|(_, rel, _)| rel).collect();
+        let truncated = walk.truncated();
+        assert_eq!(paths, vec!["file1.ts", "file2.ts"]);
+        assert!(
+            truncated,
+            "shared walk should truncate at the cap after file2"
+        );
+
+        let input = DataflowInput {
+            root: root.to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: Some(2),
+            file_glob: None,
+            exclude_glob: None,
+        };
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
+        assert_eq!(
+            result.files_analyzed, 1,
+            "only file1 should be analyzed; file2 is unreadable and consumes the second cap slot"
+        );
+        assert!(
+            result.files_truncated,
+            "analysis should be truncated at the cap after file2"
+        );
+
+        std::fs::set_permissions(&f2, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// Verifies the cache hit contract: first call is a miss + one analysis,
+    /// second call on the same repo is a hit + zero additional analyses.
+    #[test]
+    fn test_dataflow_cache_hit_contract() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::with_capacity(64);
+
+        let r1 = analyze_directory(input.clone(), &cache).unwrap();
+        let (h1, m1, a1) = cache.stats();
+        assert_eq!(m1, 1, "first call should be a miss");
+        assert_eq!(a1, 1, "first call should run one analysis");
+        assert_eq!(h1, 0, "first call should have no hits");
+
+        let r2 = analyze_directory(input, &cache).unwrap();
+        let (h2, m2, a2) = cache.stats();
+        assert_eq!(h2, 1, "second call should be a hit");
+        assert_eq!(m2, 1, "second call should have no additional misses");
+        assert_eq!(a2, 1, "second call should run no additional analyses");
+
+        let mut r1 = r1;
+        r1.duration_ms = 0;
+        let mut r2 = r2;
+        r2.duration_ms = 0;
+        assert_eq!(
+            serde_json::to_value(&r1).unwrap(),
+            serde_json::to_value(&r2).unwrap(),
+            "warm result must equal cold result"
+        );
+    }
+
+    /// Verifies cache invalidation: modifying a file changes the aggregate
+    /// fingerprint and causes a re-analysis.
+    #[test]
+    fn test_dataflow_cache_invalidation() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::with_capacity(64);
+
+        let r1 = analyze_directory(input.clone(), &cache).unwrap();
+        let (_h1, m1, a1) = cache.stats();
+        assert_eq!(m1, 1, "first call should be a miss");
+        assert_eq!(a1, 1);
+
+        let r2 = analyze_directory(input.clone(), &cache).unwrap();
+        let (h2, m2, a2) = cache.stats();
+        assert_eq!(h2, 1, "second call should be a hit");
+        assert_eq!(m2, 1);
+        assert_eq!(a2, 1);
+
+        let mut r1 = r1;
+        r1.duration_ms = 0;
+        let mut r2 = r2;
+        r2.duration_ms = 0;
+        assert_eq!(
+            serde_json::to_value(&r1).unwrap(),
+            serde_json::to_value(&r2).unwrap()
+        );
+
+        // Append a byte to one file, changing mtime + len.
+        let a_path = dir.path().join("file0.ts");
+        let mut content = std::fs::read_to_string(&a_path).unwrap();
+        content.push_str("\nconst y = 2;\n");
+        std::fs::write(&a_path, content).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let r3 = analyze_directory(input, &cache).unwrap();
+        let (h3, m3, a3) = cache.stats();
+        assert_eq!(m3, 2, "modified file should be a miss");
+        assert_eq!(h3, 1, "previous calls should still be hits");
+        assert_eq!(a3, 2, "modified file should trigger re-analysis");
+
+        let mut r3 = r3;
+        r3.duration_ms = 0;
+        assert_ne!(
+            serde_json::to_value(&r2).unwrap(),
+            serde_json::to_value(&r3).unwrap(),
+            "modified repo should produce a different result"
+        );
+    }
+
+    /// Verifies that a cached response is byte-identical to the uncached one.
+    #[test]
+    fn test_dataflow_cache_result_equivalence() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::with_capacity(64);
+
+        let cold = analyze_directory(input.clone(), &DataflowCache::new()).unwrap();
+        let warm1 = analyze_directory(input.clone(), &cache).unwrap();
+        let warm2 = analyze_directory(input, &cache).unwrap();
+
+        let mut cold = cold;
+        cold.duration_ms = 0;
+        let mut warm1 = warm1;
+        warm1.duration_ms = 0;
+        let mut warm2 = warm2;
+        warm2.duration_ms = 0;
+        assert_eq!(
+            serde_json::to_value(&cold).unwrap(),
+            serde_json::to_value(&warm1).unwrap(),
+            "first warm result must equal cold result"
+        );
+        assert_eq!(
+            serde_json::to_value(&warm1).unwrap(),
+            serde_json::to_value(&warm2).unwrap(),
+            "second warm result must equal the cached one"
+        );
+
+        let (hits, misses, analyses) = cache.stats();
+        assert_eq!(misses, 1, "shared cache should have exactly one miss");
+        assert_eq!(hits, 1, "second shared-cache call should be a hit");
+        assert_eq!(analyses, 1, "only one analysis should run");
+    }
 }
 
 #[cfg(test)]
 mod semaphore_tests {
     use super::*;
+    use crate::dataflow_cache::DataflowCache;
 
     /// Verify the semaphore constant matches the design doc value (8 = 2x 4 ARM cores).
     #[test]
@@ -269,6 +633,7 @@ mod semaphore_tests {
             let r = root.clone();
             let h = tokio::spawn(async move {
                 let _permit = WALK_SEMAPHORE.acquire().await.unwrap();
+                let cache = DataflowCache::new();
                 let input = DataflowInput {
                     root: r,
                     language: "typescript".to_string(),
@@ -277,7 +642,7 @@ mod semaphore_tests {
                     file_glob: None,
                     exclude_glob: None,
                 };
-                tokio::task::spawn_blocking(move || analyze_directory(input))
+                tokio::task::spawn_blocking(move || analyze_directory(input, &cache))
                     .await
                     .unwrap()
                     .unwrap()

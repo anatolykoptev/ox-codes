@@ -1,9 +1,12 @@
 mod dataflow;
+pub mod dataflow_cache;
 mod rewrite;
 mod scoped;
 mod search;
 mod structural;
 mod taint;
+
+pub use dataflow_cache::DataflowCache;
 
 use axum::{
     Router,
@@ -13,6 +16,7 @@ use axum::{
 #[derive(Clone)]
 pub struct AppState {
     pub scope_cache: ox_core::ScopeCache,
+    pub dataflow_cache: DataflowCache,
 }
 
 pub fn router(state: AppState) -> Router {
