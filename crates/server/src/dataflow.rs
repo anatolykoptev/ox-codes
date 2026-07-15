@@ -1,7 +1,8 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use axum::Json;
@@ -29,28 +30,139 @@ const DATAFLOW_TIMEOUT_SECS: u64 = 25;
 /// so the pool is always bounded to this many active walks.
 const SEMAPHORE_PERMITS: usize = 8;
 
+/// Bounded timeout for acquiring a walk permit. If all permits are held by
+/// in-flight (potentially stuck) walks, the caller fails fast with HTTP 503
+/// instead of queueing forever in `.acquire().await` with no timeout.
+const WALK_ACQUIRE_TIMEOUT_SECS: u64 = 5;
+
 static WALK_SEMAPHORE: Semaphore = Semaphore::const_new(SEMAPHORE_PERMITS);
+
+// ── Walk observability ───────────────────────────────────────────────────
+//
+// `WALK_METRICS` tracks how many walks are in-flight and the start timestamp
+// of the oldest one. A walk whose in-flight duration exceeds
+// `DATAFLOW_TIMEOUT_SECS` is "stuck" — its permit will never be returned
+// because `spawn_blocking` cannot be cancelled. The staleness signal lets an
+// operator detect a degraded pool (fewer and fewer available permits) before
+// the pool is fully exhausted and every request starts getting 503.
+//
+// Approximation: `oldest_start_ms` is set when the first walk starts and
+// cleared when the last walk finishes. If the first walk finishes but others
+// remain, `oldest_start_ms` may hold a stale (finished) walk's timestamp,
+// producing a false-positive staleness signal. This is acceptable for an
+// observability signal — the operator investigates, not auto-scales.
+
+static WALK_METRICS: WalkMetrics = WalkMetrics::new_const();
+
+pub(crate) struct WalkMetrics {
+    in_flight: AtomicU64,
+    oldest_start_ms: AtomicU64,
+}
+
+impl WalkMetrics {
+    const fn new_const() -> Self {
+        Self {
+            in_flight: AtomicU64::new(0),
+            oldest_start_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn new() -> Self {
+        Self {
+            in_flight: AtomicU64::new(0),
+            oldest_start_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn acquire_slot(&self) -> WalkSlot<'_> {
+        let now = now_ms();
+        let prev = self.in_flight.fetch_add(1, Ordering::Relaxed);
+        if prev == 0 {
+            self.oldest_start_ms.store(now, Ordering::Relaxed);
+        }
+        WalkSlot { metrics: self }
+    }
+
+    fn stats(&self) -> (u64, u64) {
+        (
+            self.in_flight.load(Ordering::Relaxed),
+            self.oldest_start_ms.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// RAII guard that increments `in_flight` on creation and decrements on drop.
+/// Moved into the `spawn_blocking` closure so it is dropped when the walk
+/// finishes (even on panic), not when the outer timeout fires.
+pub(crate) struct WalkSlot<'a> {
+    metrics: &'a WalkMetrics,
+}
+
+impl Drop for WalkSlot<'_> {
+    fn drop(&mut self) {
+        let prev = self.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if prev == 1 {
+            self.metrics.oldest_start_ms.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Return (in_flight, oldest_start_ms) for the global walk metrics.
+/// Exposed via `GET /cache/stats` → `walks` field.
+pub(crate) fn walk_metrics() -> (u64, u64) {
+    WALK_METRICS.stats()
+}
+
+/// Acquire a walk permit with a bounded timeout. On timeout, fail fast with
+/// HTTP 503 (backpressure) instead of queueing forever.
+async fn acquire_walk_permit(
+    semaphore: &Semaphore,
+    timeout: Duration,
+) -> Result<tokio::sync::SemaphorePermit<'_>, (StatusCode, String)> {
+    tokio::time::timeout(timeout, semaphore.acquire())
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "dataflow walk pool saturated; retry later".to_string(),
+            )
+        })?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
 
 pub async fn handle(
     State(state): State<crate::AppState>,
     Json(input): Json<DataflowInput>,
 ) -> Result<Json<DataflowResponse>, (StatusCode, String)> {
-    // Acquire a walk permit BEFORE spawning the blocking task. If all permits
-    // are taken, the caller waits here (backpressure) rather than blowing up
-    // the blocking pool with unbounded concurrency.
-    //
-    // The permit is stored in _permit so it lives until the JoinHandle is
-    // awaited (or the timeout branch drops it). Because spawn_blocking tasks
-    // cannot be cancelled, we intentionally keep the permit alive until the
-    // phantom task finishes, guaranteeing that at most SEMAPHORE_PERMITS walks
-    // run concurrently at any point in time.
-    let _permit = WALK_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Acquire a walk permit with a bounded timeout. If all permits are held
+    // by in-flight walks, fail fast with 503 instead of queueing forever.
+    let _permit = acquire_walk_permit(
+        &WALK_SEMAPHORE,
+        Duration::from_secs(WALK_ACQUIRE_TIMEOUT_SECS),
+    )
+    .await?;
+
+    // Track the walk for staleness observability. The slot is moved into the
+    // spawn_blocking closure so it is dropped when the walk finishes (even on
+    // panic or timeout — the phantom task eventually completes and drops it).
+    let slot = WALK_METRICS.acquire_slot();
 
     let dataflow_cache = state.dataflow_cache.clone();
-    let task = tokio::task::spawn_blocking(move || analyze_directory(input, &dataflow_cache));
+    let task = tokio::task::spawn_blocking(move || {
+        // Keep the permit and slot alive until the blocking task finishes.
+        // spawn_blocking cannot be cancelled, so even after the outer timeout
+        // fires, this closure runs to completion and then drops both.
+        let _slot = slot;
+        let _permit = _permit;
+        analyze_directory(input, &dataflow_cache)
+    });
 
     let result = tokio::time::timeout(Duration::from_secs(DATAFLOW_TIMEOUT_SECS), task)
         .await
@@ -710,10 +822,80 @@ mod semaphore_tests {
         assert_eq!(SEMAPHORE_PERMITS, 8);
     }
 
-    /// Verify that WALK_SEMAPHORE starts with the expected number of available permits.
+    /// Verify that WALK_SEMAPHORE never exceeds SEMAPHORE_PERMITS available
+    /// permits. Other concurrent tests may hold permits, so we assert `<=`
+    /// rather than `==` (the global semaphore is shared across all tests).
     #[test]
     fn walk_semaphore_initial_permits() {
-        assert_eq!(WALK_SEMAPHORE.available_permits(), SEMAPHORE_PERMITS);
+        assert!(
+            WALK_SEMAPHORE.available_permits() <= SEMAPHORE_PERMITS,
+            "available_permits {} should not exceed SEMAPHORE_PERMITS {}",
+            WALK_SEMAPHORE.available_permits(),
+            SEMAPHORE_PERMITS
+        );
+    }
+
+    /// Acquire on a saturated semaphore must fail fast with HTTP 503
+    /// (backpressure) instead of queueing forever. Reverting to an untimed
+    /// `.acquire().await` makes this test hang (timeout → test failure).
+    #[tokio::test]
+    async fn acquire_walk_permit_returns_503_on_saturated_semaphore() {
+        let sem = Semaphore::new(1);
+        // Saturate the single permit.
+        let _blocker = sem.acquire().await.unwrap();
+
+        let result = acquire_walk_permit(&sem, Duration::from_millis(50)).await;
+        assert!(result.is_err(), "saturated semaphore should return an error");
+        let (status, msg) = result.unwrap_err();
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "saturated pool should return 503"
+        );
+        assert!(
+            msg.contains("saturated"),
+            "error message should mention saturation: {msg}"
+        );
+    }
+
+    /// Acquire on a semaphore with available permits succeeds normally.
+    #[tokio::test]
+    async fn acquire_walk_permit_succeeds_when_permits_available() {
+        let sem = Semaphore::new(2);
+        let permit = acquire_walk_permit(&sem, Duration::from_millis(100))
+            .await
+            .expect("permits available, should succeed");
+        assert_eq!(sem.available_permits(), 1, "one permit should be held");
+        drop(permit);
+        assert_eq!(sem.available_permits(), 2, "permit released");
+    }
+
+    /// WalkMetrics tracks in-flight walk count and oldest start timestamp.
+    /// Reverting WalkGuard (removing the increment/decrement) REDS this test.
+    #[test]
+    fn walk_metrics_tracks_in_flight() {
+        let metrics = WalkMetrics::new();
+        let (in_flight, oldest) = metrics.stats();
+        assert_eq!(in_flight, 0);
+        assert_eq!(oldest, 0);
+
+        let slot1 = metrics.acquire_slot();
+        let (in_flight, oldest) = metrics.stats();
+        assert_eq!(in_flight, 1);
+        assert!(oldest > 0, "oldest_start_ms should be set on first acquire");
+
+        let slot2 = metrics.acquire_slot();
+        let (in_flight, _) = metrics.stats();
+        assert_eq!(in_flight, 2);
+
+        drop(slot1);
+        let (in_flight, _) = metrics.stats();
+        assert_eq!(in_flight, 1);
+
+        drop(slot2);
+        let (in_flight, oldest) = metrics.stats();
+        assert_eq!(in_flight, 0, "in_flight should return to 0");
+        assert_eq!(oldest, 0, "oldest_start_ms should clear when no walks remain");
     }
 
     /// 10 concurrent fast requests all complete successfully.

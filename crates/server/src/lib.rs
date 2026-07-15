@@ -30,11 +30,25 @@ struct CacheStatsEntry {
     entry_count: u64,
 }
 
+/// Walk-pool stats returned by `GET /cache/stats` → `walks`.
+///
+/// `in_flight` is the number of currently-active directory walks (permits
+/// held). `oldest_start_ms` is the UNIX-epoch millisecond timestamp of the
+/// oldest in-flight walk, or 0 if none. A walk whose age exceeds
+/// `DATAFLOW_TIMEOUT_SECS` is "stuck" (its permit will never be returned
+/// because `spawn_blocking` cannot be cancelled).
+#[derive(Debug, Serialize)]
+struct WalkStatsEntry {
+    in_flight: u64,
+    oldest_start_ms: u64,
+}
+
 /// Combined cache stats returned by `GET /cache/stats`.
 #[derive(Debug, Serialize)]
 struct CacheStatsResponse {
     scope: CacheStatsEntry,
     dataflow: CacheStatsEntry,
+    walks: WalkStatsEntry,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -57,6 +71,7 @@ async fn health() -> &'static str {
 async fn cache_stats(State(state): State<AppState>) -> Json<CacheStatsResponse> {
     let (scope_hits, scope_misses) = state.scope_cache.stats();
     let (dataflow_hits, dataflow_misses, _dataflow_analyses) = state.dataflow_cache.stats();
+    let (walk_in_flight, walk_oldest_start) = dataflow::walk_metrics();
 
     Json(CacheStatsResponse {
         scope: CacheStatsEntry {
@@ -68,6 +83,10 @@ async fn cache_stats(State(state): State<AppState>) -> Json<CacheStatsResponse> 
             hits: dataflow_hits,
             misses: dataflow_misses,
             entry_count: state.dataflow_cache.entry_count(),
+        },
+        walks: WalkStatsEntry {
+            in_flight: walk_in_flight,
+            oldest_start_ms: walk_oldest_start,
         },
     })
 }
