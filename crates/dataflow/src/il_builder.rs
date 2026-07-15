@@ -10,11 +10,29 @@ use crate::il::*;
 use crate::types::{Sid, Span};
 
 /// Build IL from source code for a given language.
+///
+/// Delegates to [`build_il_with_ext`] with an empty extension — callers that
+/// know the file extension (and thus whether to use the TSX grammar for
+/// `.tsx`/`.jsx`) should call that directly.
 pub fn build_il(source: &[u8], lang_name: &str) -> Result<IlFile> {
-    let lang_cfg = ox_langs::get_language(lang_name)
+    build_il_with_ext(source, lang_name, "")
+}
+
+/// Build IL from source code for a given language, selecting the tree-sitter
+/// grammar from the file extension.
+///
+/// `file_ext` (without leading dot, e.g. `"tsx"`) is used to select the
+/// JSX-aware TSX grammar for `.tsx`/`.jsx` files under a TypeScript-family
+/// language, instead of the non-JSX `LANGUAGE_TYPESCRIPT` which produces
+/// `ERROR` nodes on JSX and silently drops instructions in or after JSX
+/// blocks.  Grammar selection goes through `ox_langs::effective_language_id`
+/// + `get_language` (the single source of truth).
+pub fn build_il_with_ext(source: &[u8], lang_name: &str, file_ext: &str) -> Result<IlFile> {
+    let lang = ox_langs::effective_language_id(lang_name, file_ext)
+        .and_then(|id| ox_langs::get_language(id).map(|c| c.language))
         .ok_or_else(|| anyhow::anyhow!("unsupported language: {lang_name}"))?;
     let mut parser = Parser::new();
-    parser.set_language(&lang_cfg.language)?;
+    parser.set_language(&lang)?;
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| anyhow::anyhow!("parse failed"))?;
@@ -169,6 +187,7 @@ impl<'a> IlBuilder<'a> {
     pub(crate) fn visit_stmt(&mut self, node: Node) {
         match node.kind() {
             "short_var_declaration" => self.visit_short_var_decl(node),
+            "lexical_declaration" | "variable_declaration" => self.visit_var_decl(node),
             "assignment_statement" | "assignment" | "augmented_assignment" => {
                 self.visit_assignment(node);
             }

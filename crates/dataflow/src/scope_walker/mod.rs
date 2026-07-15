@@ -26,13 +26,12 @@ pub fn walk_file_with_ext(source: &[u8], lang_name: &str, file_ext: &str) -> Res
         .with_context(|| format!("unsupported language: {lang_name}"))?;
     // For the TypeScript family, .tsx/.jsx files must use the JSX-aware TSX
     // grammar; the non-JSX LANGUAGE_TYPESCRIPT produces ERROR nodes on JSX,
-    // silently dropping bindings/refs in or after JSX blocks.  Mirrors the
-    // LANGUAGE_TSX dispatch in structural.rs:109-112.
-    let lang: tree_sitter::Language = if is_tsx_grammar(lang_name, file_ext) {
-        tree_sitter_typescript::LANGUAGE_TSX.into()
-    } else {
-        lq.language().clone()
-    };
+    // silently dropping bindings/refs in or after JSX blocks.  Grammar
+    // selection goes through ox_langs::effective_language_id + get_language
+    // (the single source of truth) instead of an inline LANGUAGE_TSX literal.
+    let lang: tree_sitter::Language = ox_langs::effective_language_id(lang_name, file_ext)
+        .and_then(|id| ox_langs::get_language(id).map(|c| c.language))
+        .unwrap_or_else(|| lq.language().clone());
     let mut parser = Parser::new();
     parser.set_language(&lang)?;
     let tree = parser.parse(source, None).context("parse failed")?;
@@ -86,18 +85,6 @@ pub fn walk_file_with_ext(source: &[u8], lang_name: &str, file_ext: &str) -> Res
     Ok(ScopeChain {
         scopes: ctx.finished,
     })
-}
-
-/// Whether the TSX (JSX-aware) grammar should be used for the given language
-/// name and file extension.  An explicit `"tsx"`/`"jsx"` language name always
-/// selects TSX; for the broader TypeScript family (`typescript`/`ts`/`js`)
-/// the file extension decides — `.tsx`/`.jsx` → TSX, `.ts`/`.js` → non-JSX.
-fn is_tsx_grammar(lang_name: &str, file_ext: &str) -> bool {
-    if matches!(lang_name, "tsx" | "jsx") {
-        return true;
-    }
-    matches!(lang_name, "typescript" | "ts" | "javascript" | "js")
-        && matches!(file_ext, "tsx" | "jsx")
 }
 
 /// Build CompiledQueries for TypeScript (used for Svelte secondary parses).

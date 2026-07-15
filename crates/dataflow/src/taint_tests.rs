@@ -1,7 +1,7 @@
 //! Tests for taint analysis engine.
 
 use crate::cfg_builder::build_cfg;
-use crate::il_builder::build_il;
+use crate::il_builder::{build_il, build_il_with_ext};
 use crate::taint::analyze_taint;
 use crate::taint_rules::default_rules;
 
@@ -217,4 +217,61 @@ fn sanitizer_blocks_taint() {
 #[test]
 fn unknown_language_no_rules() {
     assert!(default_rules("ruby").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// TSX grammar selection — taint route (issue #44)
+// ---------------------------------------------------------------------------
+
+/// A `.tsx` file where a tainted value reaches a sink call.  The JSX
+/// (`const ui = <div>{tainted}</div>`) between the source and sink causes
+/// the non-JSX `LANGUAGE_TYPESCRIPT` grammar to produce `ERROR` nodes that
+/// drop all subsequent instructions in the function body — including the
+/// `sink(tainted)` call — resulting in a false negative (the taint flow is
+/// silently missed).  With the TSX grammar (selected via `build_il_with_ext`
+/// with `file_ext="tsx"`), the JSX is parsed correctly and the sink call is
+/// preserved, so taint analysis reports the flow.
+#[test]
+fn taint_tsx_sink_not_dropped() {
+    use crate::taint::{TaintSink, TaintSource};
+    use crate::taint_rules::TaintRule;
+
+    let src = br#"function App() {
+    const tainted = getSource();
+    const ui = <div>{tainted}</div>;
+    sink(tainted);
+}
+"#;
+    let rules = vec![TaintRule {
+        id: "xss".into(),
+        sources: vec![TaintSource {
+            pattern: "getSource".into(),
+            tag: "user_input".into(),
+        }],
+        sinks: vec![TaintSink {
+            pattern: "sink".into(),
+            arg_index: 0,
+            cwe: "CWE-79".into(),
+            description: "XSS".into(),
+        }],
+        sanitizers: vec![],
+        severity: "error".into(),
+    }];
+
+    // TSX grammar (via build_il_with_ext) — sink call is preserved.
+    let il = build_il_with_ext(src, "typescript", "tsx").unwrap();
+    let mut findings = Vec::new();
+    for func in &il.functions {
+        let cfg = build_cfg(func);
+        findings.extend(analyze_taint(&cfg, &rules, "App.tsx"));
+    }
+    assert!(
+        !findings.is_empty(),
+        "taint flow from getSource → sink must be reported with TSX grammar; \
+         IL had {} functions / {} total instrs",
+        il.functions.len(),
+        il.functions.iter().map(|f| f.body.len()).sum::<usize>()
+    );
+    assert_eq!(findings[0].rule_id, "xss");
+    assert_eq!(findings[0].sink.function, "sink");
 }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use ox_core::grep_filter::build_globset;
 use ox_dataflow::cfg_builder::build_cfg;
-use ox_dataflow::il_builder::build_il;
+use ox_dataflow::il_builder::build_il_with_ext;
 use ox_dataflow::taint::{TaintFinding, analyze_taint};
 use ox_dataflow::taint_rules::{TaintRule, default_rules};
 use ox_langs::get_language;
@@ -100,7 +100,7 @@ fn analyze(input: TaintInput) -> Result<TaintResponse> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let il = match build_il(&source, &input.language) {
+        let il = match build_il_with_ext(&source, &input.language, ext) {
             Ok(il) => il,
             Err(_) => continue,
         };

@@ -10,7 +10,7 @@ use tree_sitter::Query;
 use crate::grep_filter::build_globset;
 use crate::scope_cache::{CacheKey, CachedScopes, ScopeCache};
 use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, ScopedSearchInput};
-use ox_langs::{get_language, get_scope_query, language_id};
+use ox_langs::{effective_language_id, get_language, get_scope_query, language_id};
 
 pub fn scoped_search(
     input: ScopedSearchInput,
@@ -30,9 +30,6 @@ pub fn scoped_search(
         .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
     let query_str = get_scope_query(canonical_id, scope)
         .ok_or_else(|| anyhow::anyhow!("no scope query for {}/{:?}", canonical_id, scope))?;
-
-    let query = Arc::new(Query::new(&lang_cfg.language, query_str)?);
-    let language = lang_cfg.language;
 
     let include = input.file_glob.as_deref().map(build_globset).transpose()?;
     let exclude = input
@@ -92,17 +89,27 @@ pub fn scoped_search(
             scope_kind: scope,
         };
 
-        let query_ref = Arc::clone(&query);
-        let lang = language.clone();
+        // Resolve the grammar PER-FILE from the walked file's extension.
+        // For .tsx/.jsx under a TypeScript-family language, the JSX-aware
+        // TSX grammar must be used instead of the non-JSX LANGUAGE_TYPESCRIPT,
+        // which produces ERROR nodes on JSX and can cause the parser to fail
+        // to recognize subsequent function declarations (dropping their scope
+        // spans entirely).  Grammar selection goes through
+        // ox_langs::effective_language_id + get_language (single source of truth).
+        let per_file_lang = effective_language_id(&input.language, ext)
+            .and_then(|id| get_language(id).map(|c| c.language))
+            .unwrap_or_else(|| lang_cfg.language.clone());
+        let query = Query::new(&per_file_lang, query_str)?;
+        let lang = per_file_lang.clone();
         let (cached, _is_hit) = cache.get_or_insert(key, move || {
             let source = std::fs::read(&canonical)?;
-            let scopes = ScopeCache::parse_scopes(source, &query_ref, &lang)?;
+            let scopes = ScopeCache::parse_scopes(source, &query, &lang)?;
             Ok(Arc::new(scopes))
         })?;
 
         let file_matches = search_in_scopes(
             &cached,
-            &language,
+            &per_file_lang,
             &matcher,
             &rel_path.to_string_lossy(),
             &input.expand,
@@ -391,6 +398,54 @@ type Config struct {
         let (h2, m2) = cache.stats();
         assert_eq!(m2, 4, "modified file should be a miss");
         assert_eq!(h2, 2, "unchanged files should be hits");
+    }
+
+    /// Regression test for issue #44 in the /search/scoped route.
+    ///
+    /// A `.tsx` file with JSX BEFORE a function declaration.  Under the
+    /// non-JSX `LANGUAGE_TYPESCRIPT` grammar (the old fixed-grammar walk),
+    /// the JSX `const a = <Foo bar={x}>baz</Foo>` produces `ERROR` nodes
+    /// that break parser recovery — the subsequent `function App()` is not
+    /// recognized, so the `function_bodies` scope query produces no spans
+    /// for it, and the pattern `secret` inside the function body is never
+    /// searched.  With per-file grammar selection (TSX grammar for `.tsx`),
+    /// the JSX is parsed correctly, the function is recognized, and the
+    /// pattern is found.
+    #[test]
+    fn test_scoped_tsx_function_not_dropped() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("App.tsx"),
+            r#"const a = <Foo bar={x}>baz</Foo>;
+function App() {
+    const secret = getSecret();
+    return <div>{secret}</div>;
+}
+"#,
+        )
+        .unwrap();
+
+        let input = ScopedSearchInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            pattern: "secret".into(),
+            scope: "function_bodies".into(),
+            language: "typescript".into(),
+            is_regex: false,
+            max_results: 50,
+            case_sensitive: true,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::None,
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = scoped_search(input, &ScopeCache::new()).unwrap();
+        assert!(
+            !result.matches.is_empty(),
+            "secret must be found inside the .tsx function body; \
+             got {} matches (grammar selection may be wrong)",
+            result.matches.len()
+        );
     }
 
     #[test]

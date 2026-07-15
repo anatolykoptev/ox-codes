@@ -109,6 +109,24 @@ pub fn get_scope_query(name: &str, scope: ScopeKind) -> Option<&'static str> {
     }
 }
 
+/// Resolve the effective language id considering the file extension.
+///
+/// For the TypeScript family, `.tsx`/`.jsx` files must use the JSX-aware
+/// TSX grammar: a `language="typescript"` request over a `.tsx` file
+/// resolves to `"tsx"` here so the caller picks [`typescript::config_tsx`]
+/// instead of the non-JSX [`typescript::config`], which produces `ERROR`
+/// nodes on JSX and silently drops bindings/refs/instructions in or after
+/// JSX blocks.  All other languages/extensions return the canonical id
+/// unchanged.
+pub fn effective_language_id(lang_name: &str, file_ext: &str) -> Option<&'static str> {
+    let id = language_id(lang_name)?;
+    if id == "typescript" && matches!(file_ext, "tsx" | "jsx") {
+        Some("tsx")
+    } else {
+        Some(id)
+    }
+}
+
 /// Detect language from file extension.
 pub fn detect_language(path: &str) -> Option<&'static str> {
     let ext = path.rsplit('.').next()?;
@@ -218,6 +236,35 @@ mod tests {
         // ts/js still resolve to "typescript", not "tsx"
         assert_eq!(language_id("ts"), Some("typescript"));
         assert_eq!(language_id("js"), Some("typescript"));
+    }
+
+    #[test]
+    fn test_effective_language_id() {
+        // ts-family lang + tsx/jsx ext → "tsx"
+        assert_eq!(effective_language_id("typescript", "tsx"), Some("tsx"));
+        assert_eq!(effective_language_id("typescript", "jsx"), Some("tsx"));
+        assert_eq!(effective_language_id("ts", "tsx"), Some("tsx"));
+        assert_eq!(effective_language_id("javascript", "jsx"), Some("tsx"));
+        assert_eq!(effective_language_id("js", "tsx"), Some("tsx"));
+        // ts-family lang + ts/js ext → "typescript"
+        assert_eq!(
+            effective_language_id("typescript", "ts"),
+            Some("typescript")
+        );
+        assert_eq!(
+            effective_language_id("typescript", "js"),
+            Some("typescript")
+        );
+        assert_eq!(effective_language_id("typescript", ""), Some("typescript"));
+        // explicit tsx/jsx lang → "tsx" regardless of ext
+        assert_eq!(effective_language_id("tsx", "tsx"), Some("tsx"));
+        assert_eq!(effective_language_id("tsx", ""), Some("tsx"));
+        assert_eq!(effective_language_id("jsx", "jsx"), Some("tsx"));
+        // non-ts langs → unchanged
+        assert_eq!(effective_language_id("go", "go"), Some("go"));
+        assert_eq!(effective_language_id("python", "py"), Some("python"));
+        // unsupported
+        assert_eq!(effective_language_id("cobol", "cbl"), None);
     }
 
     #[test]

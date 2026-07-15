@@ -28,6 +28,39 @@ impl<'a> IlBuilder<'a> {
         });
     }
 
+    /// Handle TS/JS `const`/`let`/`var` declarations (`lexical_declaration` /
+    /// `variable_declaration`).  Each `variable_declarator` child has `name`
+    /// and optional `value` fields; the value (if present) is built as an
+    /// expression and the result is pushed as an `Instr::Assign`.
+    pub(crate) fn visit_var_decl(&mut self, node: Node) {
+        let count = node.named_child_count();
+        for i in 0..count {
+            let Some(declarator) = node.named_child(i as u32) else {
+                continue;
+            };
+            if declarator.kind() != "variable_declarator" {
+                continue;
+            }
+            let name_node = declarator.child_by_field_name("name");
+            let Some(name_node) = name_node else {
+                continue;
+            };
+            let ident = self.node_text(name_node).to_string();
+            let sid = self.next_sid();
+            self.name_table.insert(ident.clone(), sid);
+            let lval = Lval::var(Name::new(ident, sid));
+            let rval = declarator
+                .child_by_field_name("value")
+                .map(|n| self.build_expr(n))
+                .unwrap_or(Expr::Const(Const::Nil));
+            self.current_body.push(Instr::Assign {
+                lval,
+                rval,
+                span: self.span_of(node),
+            });
+        }
+    }
+
     pub(crate) fn visit_assignment(&mut self, node: Node) {
         let lhs = node.child_by_field_name("left");
         let rhs = node.child_by_field_name("right");
