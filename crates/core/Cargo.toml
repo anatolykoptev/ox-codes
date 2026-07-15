@@ -3,9 +3,14 @@ name = "ox-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Code search engine (grep, scoped, structural, rewrite) over ripgrep + tree-sitter + ast-grep (part of ox-codes)."
+keywords = ["code-search", "ripgrep", "tree-sitter", "ast-grep", "refactoring"]
+categories = ["development-tools", "parsing"]
 
 [dependencies]
-ox-langs = { path = "../langs" }
+ox-langs = { path = "../langs", version = "0.1.0" }
 grep-regex = "0.1"
 grep-searcher = "0.1"
 grep-matcher = "0.1"

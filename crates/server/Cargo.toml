@@ -3,11 +3,16 @@ name = "ox-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "axum HTTP handlers exposing ox-codes' search, rewrite, and dataflow engines as a JSON API."
+keywords = ["code-search", "http-api", "axum", "static-analysis"]
+categories = ["development-tools", "web-programming::http-server"]
 
 [dependencies]
-ox-core = { path = "../core" }
-ox-dataflow = { path = "../dataflow" }
-ox-langs = { path = "../langs" }
+ox-core = { path = "../core", version = "0.1.0" }
+ox-dataflow = { path = "../dataflow", version = "0.1.0" }
+ox-langs = { path = "../langs", version = "0.1.0" }
 axum = "0.8"
 tokio.workspace = true
 serde.workspace = true

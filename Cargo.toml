@@ -7,6 +7,8 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Anatoly Koptev"]
+repository = "https://github.com/anatolykoptev/ox-codes"
+readme = "README.md"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -22,11 +24,16 @@ name = "ox-codes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Code search, structural rewrite, and dataflow analysis as an HTTP service — ripgrep + tree-sitter + ast-grep behind one JSON API."
+keywords = ["code-search", "ripgrep", "tree-sitter", "ast-grep", "dataflow"]
+categories = ["development-tools", "command-line-utilities", "web-programming::http-server"]
 
 [dependencies]
-ox-core = { path = "crates/core" }
-ox-langs = { path = "crates/langs" }
-ox-server = { path = "crates/server" }
+ox-core = { path = "crates/core", version = "0.1.0" }
+ox-langs = { path = "crates/langs", version = "0.1.0" }
+ox-server = { path = "crates/server", version = "0.1.0" }
 clap = { version = "4", features = ["derive", "env"] }
 axum = "0.8"
 tokio.workspace = true
