@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
 use moka::sync::Cache;
@@ -9,10 +10,24 @@ use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 use ox_langs::ScopeKind;
 
 /// Default cap on the total cached source bytes.
+///
+/// This cap governs cached *source bytes* only; the `spans` Vec, key,
+/// and moka bookkeeping overhead are extra.
 const DEFAULT_CAPACITY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Default TTL for parsed-scope entries.
+///
+/// The mtime+len fingerprint is cheap but can serve stale scopes for a
+/// same-length in-place edit within the filesystem's mtime resolution. A moka
+/// TTL bounds the worst-case staleness to this many seconds without the cost of
+/// content-hashing every file.
+const DEFAULT_TTL_SECS: u64 = 300;
 
 /// Environment variable override for the scope cache byte limit.
 pub const CACHE_BYTES_ENV: &str = "OX_CODES_SCOPE_CACHE_BYTES";
+
+/// Environment variable override for the scope cache entry TTL.
+pub const CACHE_TTL_ENV: &str = "OX_CODES_SCOPE_CACHE_TTL_SECS";
 
 /// A single scope span extracted from a parsed tree-sitter tree.
 /// `start` and `end` are byte offsets into `CachedScopes::source`.
@@ -33,9 +48,14 @@ pub struct CachedScopes {
 }
 
 /// Cache key for the parsed-scope cache.
+///
 /// Uses mtime + file length as a cheap fingerprint. A content hash would
 /// require reading the file, defeating the skip-read win. mtime+len is the
 /// standard build-cache fingerprint and is safe for an in-memory read cache.
+///
+/// A moka TTL further caps worst-case staleness (see `ScopeCache`) for the
+/// rare case of a same-length in-place edit that lands within the filesystem's
+/// mtime resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     pub canonical_abs_path: PathBuf,
@@ -54,6 +74,10 @@ struct CacheStats {
 ///
 /// Key: (canonical_abs_path, mtime_nanos, file_len, language, scope_kind).
 /// Value: Arc<CachedScopes { source, spans }>.
+///
+/// Entries carry a moka TTL (default 300s, override via
+/// `OX_CODES_SCOPE_CACHE_TTL_SECS`) that acts as a staleness backstop for the
+/// mtime+len fingerprint without paying for a content hash on every read.
 #[derive(Clone)]
 pub struct ScopeCache {
     cache: Cache<CacheKey, Arc<CachedScopes>>,
@@ -62,19 +86,22 @@ pub struct ScopeCache {
 
 impl ScopeCache {
     pub fn new() -> Self {
-        let capacity = std::env::var(CACHE_BYTES_ENV)
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_CAPACITY_BYTES);
-        Self::with_capacity(capacity)
+        let capacity = parse_env_u64(CACHE_BYTES_ENV, DEFAULT_CAPACITY_BYTES);
+        let ttl_secs = parse_env_u64(CACHE_TTL_ENV, DEFAULT_TTL_SECS);
+        Self::with_capacity_and_ttl(capacity, ttl_secs)
     }
 
     pub fn with_capacity(bytes: u64) -> Self {
+        Self::with_capacity_and_ttl(bytes, DEFAULT_TTL_SECS)
+    }
+
+    fn with_capacity_and_ttl(bytes: u64, ttl_secs: u64) -> Self {
         let cache = Cache::builder()
             .max_capacity(bytes)
             .weigher(|_key, value: &Arc<CachedScopes>| {
                 value.source.len().min(u32::MAX as usize) as u32
             })
+            .time_to_live(Duration::from_secs(ttl_secs))
             .build();
 
         Self {
@@ -94,9 +121,18 @@ impl ScopeCache {
         )
     }
 
+    /// Return the number of entries in the cache.
+    ///
+    /// Runs pending internal maintenance first so the count is accurate.
+    pub fn entry_count(&self) -> u64 {
+        self.cache.run_pending_tasks();
+        self.cache.entry_count()
+    }
+
     /// Get or insert the cached scopes for `key`.
     /// `init` is called on a miss and must read the file and parse it.
-    pub fn get_or_insert<F>(&self, key: CacheKey, init: F) -> Result<Arc<CachedScopes>>
+    /// Returns the value and a flag that is `true` on cache hit.
+    pub fn get_or_insert<F>(&self, key: CacheKey, init: F) -> Result<(Arc<CachedScopes>, bool)>
     where
         F: FnOnce() -> Result<Arc<CachedScopes>>,
     {
@@ -111,12 +147,13 @@ impl ScopeCache {
 
         match value {
             Ok(v) => {
-                if was_miss.load(Ordering::Relaxed) {
-                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                } else {
+                let is_hit = !was_miss.load(Ordering::Relaxed);
+                if is_hit {
                     self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 }
-                Ok(v)
+                Ok((v, is_hit))
             }
             Err(e) => {
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
@@ -159,5 +196,26 @@ impl ScopeCache {
 impl Default for ScopeCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn parse_env_u64(env: &str, default: u64) -> u64 {
+    match std::env::var(env).ok().and_then(|s| s.parse::<u64>().ok()) {
+        Some(0) => {
+            tracing::warn!("{}=0 is invalid; using default {}", env, default);
+            default
+        }
+        Some(v) => v,
+        None => {
+            if let Ok(raw) = std::env::var(env) {
+                tracing::warn!(
+                    "{}={:?} is unparseable; using default {}",
+                    env,
+                    raw,
+                    default
+                );
+            }
+            default
+        }
     }
 }

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
 use moka::sync::Cache;
@@ -11,8 +12,19 @@ use ox_dataflow::DataflowResponse;
 /// parsed-scope entry, so this cache is bounded by entry count rather than bytes.
 const DEFAULT_CAPACITY: usize = 64;
 
+/// Default TTL for dataflow result entries.
+///
+/// The aggregate fingerprint is mtime+len per file, which can serve stale results
+/// for same-length in-place edits within the filesystem's mtime resolution. A
+/// moka TTL bounds the worst-case staleness to this many seconds without paying
+/// for a content hash of every file.
+const DEFAULT_TTL_SECS: u64 = 300;
+
 /// Environment variable override for the dataflow result cache entry limit.
 pub const CACHE_ENTRIES_ENV: &str = "OX_CODES_DATAFLOW_CACHE_ENTRIES";
+
+/// Environment variable override for the dataflow result cache entry TTL.
+pub const CACHE_TTL_ENV: &str = "OX_CODES_DATAFLOW_CACHE_TTL_SECS";
 
 /// Cache key for the dataflow result cache.
 ///
@@ -41,6 +53,10 @@ struct CacheStats {
 /// Key: repo root + language + include/exclude globs + max_results + an aggregate
 /// fingerprint of the analyzed file set (mtime_nanos + file_len per file).
 /// Value: `Arc<DataflowResponse>`.
+///
+/// Entries carry a moka TTL (default 300s, override via
+/// `OX_CODES_DATAFLOW_CACHE_TTL_SECS`) that acts as a staleness backstop for the
+/// mtime+len fingerprint without paying for a content hash of every file.
 #[derive(Clone)]
 pub struct DataflowCache {
     cache: Cache<DataflowCacheKey, Arc<DataflowResponse>>,
@@ -72,11 +88,19 @@ impl DataflowCache {
                 DEFAULT_CAPACITY
             }
         };
-        Self::with_capacity(capacity)
+        let ttl_secs = parse_env_u64(CACHE_TTL_ENV, DEFAULT_TTL_SECS);
+        Self::with_capacity_and_ttl(capacity, ttl_secs)
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        let cache = Cache::builder().max_capacity(capacity as u64).build();
+        Self::with_capacity_and_ttl(capacity, DEFAULT_TTL_SECS)
+    }
+
+    fn with_capacity_and_ttl(capacity: usize, ttl_secs: u64) -> Self {
+        let cache = Cache::builder()
+            .max_capacity(capacity as u64)
+            .time_to_live(Duration::from_secs(ttl_secs))
+            .build();
 
         Self {
             cache,
@@ -97,10 +121,23 @@ impl DataflowCache {
         )
     }
 
+    /// Return the number of entries in the cache.
+    ///
+    /// Runs pending internal maintenance first so the count is accurate.
+    pub fn entry_count(&self) -> u64 {
+        self.cache.run_pending_tasks();
+        self.cache.entry_count()
+    }
+
     /// Get or insert the cached result for `key`.
     /// `init` is called on a miss and must run the full analysis.
     /// Errors are NOT cached.
-    pub fn get_or_insert<F>(&self, key: DataflowCacheKey, init: F) -> Result<Arc<DataflowResponse>>
+    /// Returns the value and a flag that is `true` on cache hit.
+    pub fn get_or_insert<F>(
+        &self,
+        key: DataflowCacheKey,
+        init: F,
+    ) -> Result<(Arc<DataflowResponse>, bool)>
     where
         F: FnOnce() -> Result<Arc<DataflowResponse>>,
     {
@@ -118,17 +155,39 @@ impl DataflowCache {
 
         match value {
             Ok(v) => {
-                if was_miss.load(Ordering::Relaxed) {
-                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                } else {
+                let is_hit = !was_miss.load(Ordering::Relaxed);
+                if is_hit {
                     self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 }
-                Ok(v)
+                Ok((v, is_hit))
             }
             Err(e) => {
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 Err(anyhow::anyhow!("{e}"))
             }
+        }
+    }
+}
+
+fn parse_env_u64(env: &str, default: u64) -> u64 {
+    match std::env::var(env).ok().and_then(|s| s.parse::<u64>().ok()) {
+        Some(0) => {
+            tracing::warn!("{}=0 is invalid; using default {}", env, default);
+            default
+        }
+        Some(v) => v,
+        None => {
+            if let Ok(raw) = std::env::var(env) {
+                tracing::warn!(
+                    "{}={:?} is unparseable; using default {}",
+                    env,
+                    raw,
+                    default
+                );
+            }
+            default
         }
     }
 }

@@ -36,45 +36,71 @@ pub struct LangConfig {
 
 /// Get tree-sitter Language + config by name.
 pub fn get_language(name: &str) -> Option<LangConfig> {
-    match name {
-        "go" | "golang" => Some(go::config()),
-        "rust" | "rs" => Some(rust_lang::config()),
-        "python" | "py" => Some(python::config()),
-        "typescript" | "ts" | "javascript" | "js" => Some(typescript::config()),
+    match language_id(name)? {
+        "go" => Some(go::config()),
+        "rust" => Some(rust_lang::config()),
+        "python" => Some(python::config()),
+        "typescript" => Some(typescript::config()),
         "svelte" => Some(svelte::config()),
         "java" => Some(java::config()),
         "c" => Some(c::config()),
-        "cpp" | "c++" | "cxx" => Some(cpp::config()),
-        "ruby" | "rb" => Some(ruby::config()),
-        "csharp" | "c#" | "cs" => Some(csharp::config()),
+        "cpp" => Some(cpp::config()),
+        "ruby" => Some(ruby::config()),
+        "csharp" => Some(csharp::config()),
         "php" => Some(php::config()),
-        "bash" | "sh" => Some(bash::config()),
+        "bash" => Some(bash::config()),
         "lua" => Some(lua::config()),
         "swift" => Some(swift::config()),
-        "kotlin" | "kt" => Some(kotlin::config()),
+        "kotlin" => Some(kotlin::config()),
         "zig" => Some(zig::config()),
+        _ => None,
+    }
+}
+
+/// Return the canonical language id for a name or alias.
+///
+/// Two aliases that resolve to the same grammar (e.g. `go` and `golang`)
+/// both map to `"go"`.
+pub fn language_id(name: &str) -> Option<&'static str> {
+    match name {
+        "go" | "golang" => Some("go"),
+        "rust" | "rs" => Some("rust"),
+        "python" | "py" => Some("python"),
+        "typescript" | "ts" | "javascript" | "js" => Some("typescript"),
+        "svelte" => Some("svelte"),
+        "java" => Some("java"),
+        "c" => Some("c"),
+        "cpp" | "c++" | "cxx" => Some("cpp"),
+        "ruby" | "rb" => Some("ruby"),
+        "csharp" | "c#" | "cs" => Some("csharp"),
+        "php" => Some("php"),
+        "bash" | "sh" => Some("bash"),
+        "lua" => Some("lua"),
+        "swift" => Some("swift"),
+        "kotlin" | "kt" => Some("kotlin"),
+        "zig" => Some("zig"),
         _ => None,
     }
 }
 
 /// Get tree-sitter query string for a scope kind in a language.
 pub fn get_scope_query(name: &str, scope: ScopeKind) -> Option<&'static str> {
-    match name {
-        "go" | "golang" => Some(go::scope_query(scope)),
-        "rust" | "rs" => Some(rust_lang::scope_query(scope)),
-        "python" | "py" => Some(python::scope_query(scope)),
-        "typescript" | "ts" | "javascript" | "js" => Some(typescript::scope_query(scope)),
+    match language_id(name)? {
+        "go" => Some(go::scope_query(scope)),
+        "rust" => Some(rust_lang::scope_query(scope)),
+        "python" => Some(python::scope_query(scope)),
+        "typescript" => Some(typescript::scope_query(scope)),
         "svelte" => Some(svelte::scope_query(scope)),
         "java" => Some(java::scope_query(scope)),
         "c" => Some(c::scope_query(scope)),
-        "cpp" | "c++" | "cxx" => Some(cpp::scope_query(scope)),
-        "ruby" | "rb" => Some(ruby::scope_query(scope)),
-        "csharp" | "c#" | "cs" => Some(csharp::scope_query(scope)),
+        "cpp" => Some(cpp::scope_query(scope)),
+        "ruby" => Some(ruby::scope_query(scope)),
+        "csharp" => Some(csharp::scope_query(scope)),
         "php" => Some(php::scope_query(scope)),
-        "bash" | "sh" => Some(bash::scope_query(scope)),
+        "bash" => Some(bash::scope_query(scope)),
         "lua" => Some(lua::scope_query(scope)),
         "swift" => Some(swift::scope_query(scope)),
-        "kotlin" | "kt" => Some(kotlin::scope_query(scope)),
+        "kotlin" => Some(kotlin::scope_query(scope)),
         "zig" => Some(zig::scope_query(scope)),
         _ => None,
     }

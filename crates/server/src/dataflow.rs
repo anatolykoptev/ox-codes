@@ -67,6 +67,7 @@ pub async fn handle(
 }
 
 fn analyze_directory(input: DataflowInput, cache: &DataflowCache) -> Result<DataflowResponse> {
+    let start = Instant::now();
     let mut input = input;
     let canonical_root = match std::fs::canonicalize(&input.root) {
         Ok(p) => p,
@@ -82,8 +83,13 @@ fn analyze_directory(input: DataflowInput, cache: &DataflowCache) -> Result<Data
         Err(_) => return analyze_uncached(input),
     };
 
-    let response = cache.get_or_insert(key, move || Ok(Arc::new(analyze_uncached(input)?)))?;
-    Ok((*response).clone())
+    let (response, is_hit) =
+        cache.get_or_insert(key, move || Ok(Arc::new(analyze_uncached(input)?)))?;
+    let mut response = (*response).clone();
+    if is_hit {
+        response.duration_ms = start.elapsed().as_millis() as u64;
+    }
+    Ok(response)
 }
 
 fn build_key(input: &DataflowInput, canonical_root: &Path) -> Result<DataflowCacheKey> {
@@ -168,11 +174,6 @@ impl Iterator for FilteredWalk<'_> {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-
-            if self.max_files.is_some_and(|cap| self.count >= cap) {
-                self.truncated = true;
-                return None;
-            }
 
             self.count += 1;
             let rel_str = rel_path.to_string_lossy().into_owned();
@@ -273,7 +274,8 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
             break;
         }
     }
-    let files_truncated = walk.truncated();
+    let files_truncated =
+        walk.truncated() || input.max_files.is_some_and(|cap| files_analyzed >= cap);
 
     let total = all_findings.len();
     let truncated = total > input.max_results;
@@ -476,6 +478,11 @@ function leaks() {
         assert_eq!(h2, 1, "second call should be a hit");
         assert_eq!(m2, 1, "second call should have no additional misses");
         assert_eq!(a2, 1, "second call should run no additional analyses");
+        assert!(
+            r2.duration_ms < 100,
+            "hit path should report a small duration_ms, got {}",
+            r2.duration_ms
+        );
 
         let mut r1 = r1;
         r1.duration_ms = 0;
