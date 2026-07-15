@@ -105,6 +105,9 @@ impl ScopeCache {
         // ttl_secs=0 means "no TTL" (an explicit escape hatch): do not set
         // `time_to_live` at all, so a hot unchanged entry never expires.
         // Any other value bounds worst-case staleness to that many seconds.
+        if let Some(msg) = ttl_zero_warning(ttl_secs) {
+            tracing::warn!("{}", msg);
+        }
         let mut builder =
             Cache::builder()
                 .max_capacity(bytes)
@@ -213,6 +216,31 @@ impl Default for ScopeCache {
 
 fn parse_env_u64(env: &str, default: u64) -> u64 {
     resolve_env_u64(std::env::var(env).ok(), env, default)
+}
+
+/// Pure helper: return a staleness-backstop-disabled warning message iff
+/// `ttl_secs == 0` (the never-expire escape hatch), else `None`.
+///
+/// `TTL=0` inverts the near-universal ops convention (`Cache-Control: max-age=0`
+/// = expire immediately) — here it means *never* expire. Combined with the
+/// mtime+len fingerprint, a same-length in-place edit within mtime resolution
+/// can serve a stale scope until restart. This warning makes the footgun
+/// loud without changing the intentional behavior.
+///
+/// Separated from the `tracing::warn!` call so it is unit-testable without a
+/// tracing subscriber (mirrors the `resolve_env_u64` pattern).
+fn ttl_zero_warning(ttl_secs: u64) -> Option<String> {
+    if ttl_secs == 0 {
+        Some(format!(
+            "{}=0: scope cache staleness backstop is DISABLED (TTL=0 means never-expire here, \
+             the opposite of the max-age=0 convention). Combined with the mtime+len \
+             fingerprint, a same-length in-place edit within mtime resolution can serve \
+             a stale scope until restart. Set a non-zero TTL to re-enable the backstop.",
+            CACHE_TTL_ENV,
+        ))
+    } else {
+        None
+    }
 }
 
 /// Pure resolution of a (possibly absent/unparseable) env value, separated from
@@ -328,5 +356,25 @@ mod tests {
             300,
             "absent value must fall back to the default"
         );
+    }
+
+    /// TTL=0 disables the staleness backstop (never-expire). The pure helper
+    /// must return a warning message iff ttl_secs == 0, so the constructor can
+    /// emit a loud `tracing::warn!` without needing a tracing subscriber in
+    /// tests. Reverting the helper (always returning None) REDS this test.
+    #[test]
+    fn test_ttl_zero_warning_returns_some_for_zero() {
+        assert!(
+            ttl_zero_warning(0).is_some(),
+            "ttl=0 must produce a staleness-backstop-disabled warning"
+        );
+    }
+
+    /// Any non-zero TTL keeps the staleness backstop active — no warning.
+    /// Reverting the helper (always returning Some) REDS this test.
+    #[test]
+    fn test_ttl_zero_warning_returns_none_for_nonzero() {
+        assert!(ttl_zero_warning(300).is_none(), "default ttl must not warn");
+        assert!(ttl_zero_warning(1).is_none(), "ttl=1 must not warn");
     }
 }
