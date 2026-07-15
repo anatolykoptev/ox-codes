@@ -306,7 +306,11 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchR
                     }
                 }
                 block.map(|blk| crate::types::ExpandedBlock {
-                    body: crate::expand::wrap_body(blk.body, input.format, input.language.as_deref()),
+                    body: crate::expand::wrap_body(
+                        blk.body,
+                        input.format,
+                        input.language.as_deref(),
+                    ),
                     ..blk
                 })
             } else {

@@ -25,6 +25,7 @@ pub fn scoped_search(
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("language is required for scoped search"))?;
+    let lang_name = language.to_string();
 
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(!input.case_sensitive)
@@ -92,7 +93,7 @@ pub fn scoped_search(
             canonical_abs_path: canonical.clone(),
             mtime_nanos,
             file_len,
-            language: input.language.clone(),
+            language: lang_name.clone(),
             scope_kind: scope,
         };
 
@@ -112,7 +113,7 @@ pub fn scoped_search(
             &input.expand,
             input.max_tokens,
             input.format,
-            language,
+            &lang_name,
         );
         all_matches.extend(file_matches);
 

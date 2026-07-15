@@ -61,9 +61,7 @@ fn analyze(input: TaintInput) -> Result<TaintResponse> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("language is required for taint analysis"))?;
 
-    let rules = input
-        .rules
-        .unwrap_or_else(|| default_rules(language));
+    let rules = input.rules.unwrap_or_else(|| default_rules(language));
 
     let lang_cfg = get_language(language)
         .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", language))?;
