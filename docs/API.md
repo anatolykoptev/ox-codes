@@ -221,21 +221,51 @@ Structural search-and-replace using the same pattern grammar as `/search/structu
     {
       "file": "pkg/util/errors.go",
       "matches": 3,
+      "skipped": 1,
       "diff": "--- a/pkg/util/errors.go\n+++ b/pkg/util/errors.go\n@@ -10,1 +10,1 @@\n-errors.New(msg)\n+fmt.Errorf(\"%w\", msg)\n"
     }
   ],
   "total_matches": 3,
+  "total_skipped": 1,
   "total_files": 1,
-  "duration_ms": 45
+  "duration_ms": 45,
+  "rejected": [
+    {
+      "file": "pkg/util/broken.go",
+      "reason": "re-parse introduced 2 new ERROR/MISSING node(s) (original=0, modified=2); the rewrite would corrupt the file"
+    }
+  ]
 }
 ```
+
+#### Counting semantics
+
+`matches`/`total_matches` count only edits **ACTUALLY applied** (post-overlap-resolution), not raw ast-grep matches. When `foo($$$ARGS)` matches `foo(foo(x))` at two nesting depths, only the outer (widest) edit is applied; the inner one is counted in `skipped`/`total_skipped`.
+
+| Field | Type | Description |
+|---|---|---|
+| `files` | array | One entry per file with at least one applied edit |
+| `files[].matches` | int | Edits applied to this file (post-overlap-resolution) |
+| `files[].skipped` | int | Edits skipped for this file due to overlapping/nested match ranges (omitted when 0) |
+| `files[].diff` | string | Unified diff of the changes |
+| `total_matches` | int | Total edits applied across all files |
+| `total_skipped` | int | Total edits skipped due to overlapping/nested ranges (omitted when 0) |
+| `total_files` | int | Number of files with at least one applied edit |
+| `duration_ms` | int | Wall-clock duration |
+| `rejected` | array | Files whose post-edit re-parse invariant failed and were **NOT** persisted (omitted when empty). The batch continues past these so valid files still land. |
+| `rejected[].file` | string | File path (relative to root) |
+| `rejected[].reason` | string | Why the file was rejected (new ERROR/MISSING nodes introduced) |
+
+When `apply: true`, each file's modified buffer is re-parsed with the same grammar used for matching. If the re-parse introduces new `ERROR` or `MISSING` tree-sitter nodes that were not in the original tree, the file is **not** persisted and is reported in `rejected` instead. The batch does not abort — valid files are still written.
 
 ### Errors
 
 | Status | Condition |
 |---|---|
-| `400` | Missing `language`, invalid pattern, write failure (when `apply: true`) |
+| `400` | Missing `language`, invalid pattern |
 | `500` | Internal spawn failure |
+
+Note: a per-file re-parse invariant failure (when `apply: true`) is **not** a `400` — the file is reported in `rejected` and the batch continues. A `400` is returned only for request-level errors (bad pattern, unknown language).
 
 ---
 

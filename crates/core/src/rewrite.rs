@@ -7,7 +7,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use ast_grep_core::AstGrep;
 use ast_grep_core::matcher::Pattern;
-use ast_grep_core::tree_sitter::StrDoc;
+use ast_grep_core::tree_sitter::{LanguageExt, StrDoc};
 use ignore::WalkBuilder;
 use tree_sitter::{Language, Parser};
 
@@ -34,8 +34,26 @@ fn write_locks() -> &'static [Mutex<()>] {
 /// Pick the stripe mutex for `path`. Canonicalizes so that two paths referring
 /// to the same file (after symlink resolution) hash to the same stripe; falls
 /// back to the literal path if canonicalize fails (file not yet readable).
+///
+/// F5 (#53): if canonicalize fails we fall back to the literal path, which can
+/// split two concurrent callers for the SAME file onto different stripes (one
+/// canonicalized, one literal) — reopening the #47 race for that pair. We
+/// warn-log (once) so the fallback is observable rather than silent.
 fn stripe_for(path: &Path) -> &'static Mutex<()> {
-    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let key = match std::fs::canonicalize(path) {
+        Ok(c) => c,
+        Err(_) => {
+            static WARNED: OnceLock<()> = OnceLock::new();
+            WARNED.get_or_init(|| {
+                tracing::warn!(
+                    path = %path.display(),
+                    "rewrite: canonicalize failed, falling back to literal path for stripe hashing \
+                     (concurrent same-file callers may land on different stripes — issue #47 race)"
+                );
+            });
+            path.to_path_buf()
+        }
+    };
     let mut h = DefaultHasher::new();
     key.hash(&mut h);
     let idx = (h.finish() as usize) % WRITE_LOCK_STRIPES;
@@ -65,6 +83,7 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
     let mut files: Vec<RewriteFileResult> = Vec::new();
     let mut total_matches = 0usize;
     let mut total_skipped = 0usize;
+    let mut rejected: Vec<crate::types::RewriteRejection> = Vec::new();
 
     let walker = WalkBuilder::new(root)
         .standard_filters(true)
@@ -92,10 +111,20 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         // For apply=true, serialize the full read→compute→persist critical
         // section per canonicalized path so two concurrent rewrites of the
         // SAME file cannot lose an edit (issue #47). Dry runs hold no lock.
+        //
+        // F3 (#53): recover from poison deliberately. The stripe Mutex guards
+        // NO data (Mutex<()>), so recovery is safe — a panic elsewhere in the
+        // guarded span would otherwise poison this stripe FOREVER (1/64 of
+        // paths permanently rejected with a sticky DoS). We log the recovery
+        // so it's diagnosable rather than silently absorbed.
         let _write_guard = if input.apply {
-            Some(stripe_for(path).lock().map_err(|e| {
-                anyhow::anyhow!("rewrite: write lock poisoned for {}: {e}", path.display())
-            })?)
+            Some(stripe_for(path).lock().unwrap_or_else(|e| {
+                tracing::warn!(
+                    path = %path.display(),
+                    "rewrite: stripe write-lock poisoned, recovering (Mutex<()> guards no data)"
+                );
+                e.into_inner()
+            }))
         } else {
             None
         };
@@ -138,23 +167,32 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         let modified = apply_edits(&src, accepted);
 
         if input.apply {
-            // Post-write invariant (#41): re-parse the modified buffer with the
-            // SAME grammar used for matching. If it fails to parse at all or
-            // introduces NEW ERROR/MISSING nodes that were not in the original
-            // tree, do NOT persist — bail before touching disk so the file is
-            // left untouched rather than corrupted.
-            let ts_lang = wrapper.ts_language();
+            // Post-write invariant (#41/#53): re-parse the modified buffer with
+            // the SAME grammar used for matching. If it fails to parse at all
+            // or introduces NEW ERROR/MISSING nodes (F1: detected via the
+            // is_error()/is_missing() flags, NOT kind() string compares) that
+            // were not in the original tree, do NOT persist that file.
+            //
+            // F2 (#53): do NOT bail the whole batch — earlier files in walk
+            // order are already persisted, and the server maps any Err→400,
+            // discarding the result so the caller can't tell which files were
+            // already mutated. Instead record the file as REJECTED, leave it
+            // untouched, and CONTINUE the walk so valid files still land.
+            let ts_lang = wrapper.get_ts_language();
             let orig_errors = count_errors(&src, &ts_lang).unwrap_or(usize::MAX);
             let new_errors = count_errors(&modified, &ts_lang).unwrap_or(usize::MAX);
             if new_errors > orig_errors {
-                bail!(
-                    "rewrite: refusing to persist {}: re-parse introduced {} new ERROR node(s) \
-                     (original={}, modified={}); the rewrite would corrupt the file",
-                    path.display(),
-                    new_errors - orig_errors,
-                    orig_errors,
-                    new_errors
-                );
+                rejected.push(crate::types::RewriteRejection {
+                    file: rel_path.clone(),
+                    reason: format!(
+                        "re-parse introduced {} new ERROR/MISSING node(s) \
+                         (original={}, modified={}); the rewrite would corrupt the file",
+                        new_errors - orig_errors,
+                        orig_errors,
+                        new_errors
+                    ),
+                });
+                continue;
             }
 
             // Atomic write: NamedTempFile gives unique name + persist() does rename(2).
@@ -192,6 +230,7 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         total_skipped,
         total_files,
         duration_ms: start.elapsed().as_millis() as u64,
+        rejected,
     })
 }
 
@@ -251,7 +290,13 @@ fn count_errors(src: &str, lang: &Language) -> Option<usize> {
 
 fn count_errors_in(node: tree_sitter::Node) -> usize {
     let mut n = 0;
-    if node.kind() == "ERROR" || node.kind() == "MISSING" {
+    // F1 (#53): use the `is_error()`/`is_missing()` flags, NOT kind() string
+    // compares. A MISSING (zero-width, auto-inserted) node's `kind()` is the
+    // EXPECTED grammar symbol (e.g. `")"`, `"}"`), never the literal
+    // `"MISSING"` — so `kind() == "MISSING"` never fired and a rewrite that
+    // drops a required closing/terminator token (recovered via a pure MISSING
+    // insertion with NO ERROR node) silently passed the invariant.
+    if node.is_error() || node.is_missing() {
         n += 1;
     }
     let mut i = 0;
@@ -395,34 +440,20 @@ mod tests {
     }
 
     /// Re-parse `src` with the tree-sitter grammar for `lang_name` and return
-    /// the number of `ERROR` nodes in the tree. Used to assert the persisted
-    /// buffer is not silently corrupted into invalid syntax.
+    /// the number of ERROR/MISSING nodes in the tree. Used to assert the
+    /// persisted buffer is not silently corrupted into invalid syntax.
+    ///
+    /// F7 (#53): delegates to the production `count_errors_in` (via the
+    /// `count_errors` helper) instead of re-implementing the tree walk — the
+    /// only part that legitimately differs is the lang-resolution/parse
+    /// boilerplate (tests resolve via `ox_langs::get_language`, production via
+    /// the ast-grep `LangWrapper`).
     fn count_error_nodes(src: &str, lang_name: &str) -> usize {
         let cfg = match ox_langs::get_language(lang_name) {
             Some(c) => c,
             None => return 0,
         };
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&cfg.language).is_err() {
-            return usize::MAX;
-        }
-        let tree = match parser.parse(src.as_bytes(), None) {
-            Some(t) => t,
-            None => return usize::MAX,
-        };
-        fn walk(node: tree_sitter::Node) -> usize {
-            let mut n = 0;
-            if node.kind() == "ERROR" || node.kind() == "MISSING" {
-                n += 1;
-            }
-            let mut i = 0;
-            while let Some(child) = node.child(i) {
-                n += walk(child);
-                i += 1;
-            }
-            n
-        }
-        walk(tree.root_node())
+        count_errors(src, &cfg.language).unwrap_or(usize::MAX)
     }
 
     /// Bug A (#41): nested/overlapping ast-grep matches must not silently
@@ -485,9 +516,8 @@ mod tests {
 
     /// Bug A (#41) — post-write re-parse invariant: a rewrite whose result is
     /// syntactically invalid for the target grammar must NOT be persisted.
-    /// Today there is no re-parse check, so the corrupt buffer is written and
-    /// the call returns Ok. After fix the write is rolled back (Err returned,
-    /// file untouched).
+    /// After F2 (#53) the file is recorded in `rejected` (not a batch-killing
+    /// Err) and the file is left untouched on disk.
     #[test]
     fn test_rewrite_apply_reparse_invariant_rejects_invalid() {
         let dir = TempDir::new().unwrap();
@@ -506,19 +536,78 @@ mod tests {
             exclude_glob: None,
             apply: true,
         };
-        let result = rewrite(input);
+        let result =
+            rewrite(input).expect("batch must not Err on a per-file invariant failure (F2)");
 
-        assert!(
-            result.is_err(),
-            "rewrite of a match into invalid syntax must be rejected, not persisted; got Ok with {:?}",
-            result.ok()
-        );
-        // File must be left untouched (write rolled back).
+        // File must be left untouched (not persisted).
         let content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(
             content, original,
             "corrupt buffer must not be persisted; file was changed to: {content}"
         );
+        // The bad file must be reported in `rejected`, not in `files`.
+        assert_eq!(
+            result.files.len(),
+            0,
+            "rejected file must not appear in files"
+        );
+        assert_eq!(result.rejected.len(), 1, "bad file must be in rejected");
+        assert!(result.rejected[0].file.contains("test.js"));
+    }
+
+    /// F1 (#53): MISSING-only recovery must be detected by the re-parse
+    /// invariant. tree-sitter represents a missing (zero-width, auto-inserted)
+    /// token as a node whose `kind()` is the EXPECTED grammar symbol (e.g. `")"`,
+    /// `"}"`), NOT the literal string `"MISSING"` — and whose `is_missing()`
+    /// flag is set. The old guard checked `node.kind() == "MISSING"` (never
+    /// true), so a rewrite that drops a required closing token — recovered by
+    /// tree-sitter via a pure MISSING insertion with NO ERROR node — silently
+    /// passed the invariant and got persisted. This rewrite removes the closing
+    /// `}` of a Go function body, producing a MISSING `}` with no ERROR node.
+    #[test]
+    fn test_rewrite_apply_reparse_invariant_rejects_missing_only_recovery() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.go");
+        let original = "package main\nfunc f() { x := 1 }\n";
+        fs::write(&file_path, original).unwrap();
+
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "func $N() { $$$B }".into(),
+            // Drop the closing `}` — tree-sitter-go recovers via a MISSING `}`
+            // insertion with no ERROR node.
+            rewrite: "func $N() { $$$B".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: true,
+        };
+        let result = rewrite(input);
+
+        // The file must NOT be persisted (rejected via Err or recorded in
+        // `rejected`). Either way, the on-disk content is untouched.
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, original,
+            "MISSING-only corruption must not be persisted; file was changed to: {content}"
+        );
+        // And the rewrite must surface the rejection (not silently Ok with
+        // the bad file counted in `files` as a successful write).
+        if let Ok(ref r) = result {
+            assert!(
+                !r.rejected.is_empty(),
+                "MISSING-only corruption must be reported in `rejected`, \
+                 got Ok with no rejections: {:?}",
+                r
+            );
+            assert!(
+                r.files.is_empty(),
+                "rejected file must not also appear in `files`: {:?}",
+                r.files
+            );
+        }
+        // Err is also acceptable (hard error, file is untouched).
     }
 
     /// Bug B (#47): two concurrent `/rewrite apply=true` on the SAME file but
@@ -572,5 +661,87 @@ mod tests {
             content.contains("foo2") && content.contains("bar2"),
             "both concurrent edits must be present; lost an update. file={content}"
         );
+    }
+
+    /// F2 (#53): a batch with one invalid-rewrite file must still persist the
+    /// valid files and report the bad one in `rejected` — NOT return a 400
+    /// (Err) that discards the whole batch. Before F2, the per-file invariant
+    /// `bail!` killed the whole `rewrite()` on the first bad file; earlier
+    /// files in walk order were already persisted but the server mapped Err→400
+    /// and dropped the result, so the caller couldn't tell which files were
+    /// already mutated.
+    ///
+    /// Trick: one literal pattern `foo(x)` + one literal rewrite `foo(x))`
+    /// (adds an extra `)`). valid.js has a pre-existing MISSING `)` (unclosed
+    /// paren), so the extra `)` FIXES it (new_errors < orig_errors →
+    /// persisted). bad.js is clean, so the extra `)` CREATES an ERROR
+    /// (new_errors > orig_errors → rejected). Both paths in one batch call.
+    #[test]
+    fn test_rewrite_batch_partial_persists_valid_reports_rejected() {
+        let dir = TempDir::new().unwrap();
+        // valid.js: `(foo(x)` has a MISSING `)` (1 error in original). The
+        // rewrite's extra `)` closes the paren → 0 errors → PERSISTED.
+        let valid_path = dir.path().join("valid.js");
+        let valid_original = "(foo(x)\n";
+        fs::write(&valid_path, valid_original).unwrap();
+        // bad.js: `foo(x)` is clean (0 errors). The rewrite's extra `)` →
+        // 1 ERROR → REJECTED.
+        let bad_path = dir.path().join("bad.js");
+        let bad_original = "foo(x)\n";
+        fs::write(&bad_path, bad_original).unwrap();
+
+        // One pattern+rewrite: `foo(x)` → `foo(x))` (adds extra `)`).
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "foo(x)".into(),
+            rewrite: "foo(x))".into(),
+            language: "javascript".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: true,
+        };
+        let result = rewrite(input).expect("batch must NOT Err on a per-file rejection (F2)");
+
+        // valid.js was persisted (the extra `)` fixed the MISSING `)`).
+        let valid_content = fs::read_to_string(&valid_path).unwrap();
+        assert_eq!(
+            valid_content, "(foo(x))\n",
+            "valid file must be persisted; got: {valid_content}"
+        );
+        // bad.js was NOT persisted (left untouched — extra `)` creates ERROR).
+        let bad_content = fs::read_to_string(&bad_path).unwrap();
+        assert_eq!(
+            bad_content, bad_original,
+            "bad file must be left untouched; got: {bad_content}"
+        );
+        // Result reports: 1 file persisted (valid.js), 1 rejected (bad.js).
+        assert_eq!(
+            result.files.len(),
+            1,
+            "exactly the valid file must be in files"
+        );
+        assert!(result.files[0].file.contains("valid.js"));
+        assert_eq!(result.rejected.len(), 1, "the bad file must be in rejected");
+        assert!(result.rejected[0].file.contains("bad.js"));
+    }
+
+    /// F6 (#53): `resolve_overlaps` tie-break at equal start position must
+    /// keep the WIDEST edit (longest deletion). The existing fixture
+    /// `foo(foo(x))` has DIFFERENT start positions so the tie-break never
+    /// runs. This test uses two edits at the SAME `pos` with different `del`
+    /// lengths and asserts the wider one is kept, the narrower is skipped.
+    #[test]
+    fn test_resolve_overlaps_same_start_widest_first() {
+        // Two edits at pos=5: one deletes 3 bytes (narrow), one deletes 7
+        // bytes (wide). The widest-first tie-break must keep the wide one.
+        let edits = vec![(5, 3, "NARROW".to_string()), (5, 7, "WIDE".to_string())];
+        let (accepted, skipped) = resolve_overlaps(edits);
+        assert_eq!(accepted.len(), 1, "only the widest edit must be accepted");
+        assert_eq!(
+            accepted[0].2, "WIDE",
+            "the widest edit must win the tie-break"
+        );
+        assert_eq!(skipped, 1, "the narrower edit must be reported as skipped");
     }
 }
