@@ -234,7 +234,7 @@ type Config struct {
         };
         let result = scoped_search(input).unwrap();
         // Only TODOs inside function bodies (line 7 comment, line 8 string)
-        assert!(result.matches.len() >= 1);
+        assert!(!result.matches.is_empty());
         assert!(result.matches.iter().all(|m| m.line >= 6)); // inside main()
     }
 

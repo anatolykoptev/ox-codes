@@ -378,7 +378,7 @@ func foo() error {
         };
         let result = structural_search(input).unwrap();
         assert!(
-            result.matches.len() >= 1,
+            !result.matches.is_empty(),
             "should find error check pattern, got: {:?}",
             result.matches
         );

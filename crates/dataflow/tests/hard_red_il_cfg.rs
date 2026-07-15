@@ -4,7 +4,7 @@
 //! get wrong during refactoring.
 
 use ox_dataflow::cfg_builder::build_cfg;
-use ox_dataflow::il::{Base, Const, Expr, IlFunction, Instr, Lval, Name, Offset};
+use ox_dataflow::il::{Const, Expr, IlFunction, Instr, Lval, Name, Offset};
 use ox_dataflow::il_builder::build_il;
 use ox_dataflow::types::Span;
 
