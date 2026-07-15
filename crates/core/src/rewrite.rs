@@ -14,10 +14,15 @@ use crate::types::{RewriteFileResult, RewriteInput, RewriteResponse};
 pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
     let start = Instant::now();
 
-    let lang_name = input.language.to_lowercase();
+    let lang_name = input
+        .language
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("language is required for rewrite"))?
+        .to_lowercase();
     let wrapper = match lang_wrapper(&lang_name) {
         Some(w) => w,
-        None => bail!("unsupported language: {}", input.language),
+        None => bail!("unsupported language: {}", lang_name),
     };
 
     let pattern = Pattern::try_new(&input.pattern, wrapper.clone())
@@ -153,7 +158,7 @@ mod tests {
             root: dir.path().to_string_lossy().into(),
             pattern: "if $ERR != nil { return $ERR }".into(),
             rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
@@ -177,7 +182,7 @@ mod tests {
             root: dir.path().to_string_lossy().into(),
             pattern: "if $E != nil { return $E }".into(),
             rewrite: "if $E != nil { return fmt.Errorf(\"%w\", $E) }".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
@@ -200,7 +205,7 @@ mod tests {
             root: dir.path().to_string_lossy().into(),
             pattern: "if $X != nil { return $X }".into(),
             rewrite: "replaced".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 50,
             file_glob: None,
             exclude_glob: None,
@@ -243,7 +248,7 @@ mod tests {
             root: dir.path().to_str().unwrap().to_string(),
             pattern: "if $ERR != nil { return $ERR }".into(),
             rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             max_results: 10,
             file_glob: None,
             exclude_glob: None,

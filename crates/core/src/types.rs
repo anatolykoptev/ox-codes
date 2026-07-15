@@ -44,7 +44,8 @@ pub struct ScopedSearchInput {
     pub root: String,
     pub pattern: String,
     pub scope: String,
-    pub language: String,
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default)]
     pub is_regex: bool,
     #[serde(default = "default_max_results")]
@@ -67,7 +68,8 @@ pub struct ScopedSearchInput {
 pub struct StructuralSearchInput {
     pub root: String,
     pub pattern: String,
-    pub language: String,
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default = "default_max_results")]
     pub max_results: usize,
     #[serde(default)]
@@ -87,7 +89,8 @@ pub struct RewriteInput {
     pub root: String,
     pub pattern: String,
     pub rewrite: String,
-    pub language: String,
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default = "default_max_results")]
     pub max_results: usize,
     #[serde(default)]

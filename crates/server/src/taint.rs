@@ -17,7 +17,8 @@ use ox_langs::get_language;
 #[derive(Debug, Deserialize)]
 pub struct TaintInput {
     pub root: String,
-    pub language: String,
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default)]
     pub rules: Option<Vec<TaintRule>>,
     #[serde(default = "default_max_results")]
@@ -54,12 +55,16 @@ pub async fn handle(
 
 fn analyze(input: TaintInput) -> Result<TaintResponse> {
     let start = Instant::now();
-    let rules = input
-        .rules
-        .unwrap_or_else(|| default_rules(&input.language));
+    let language = input
+        .language
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("language is required for taint analysis"))?;
 
-    let lang_cfg = get_language(&input.language)
-        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
+    let rules = input.rules.unwrap_or_else(|| default_rules(language));
+
+    let lang_cfg = get_language(language)
+        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", language))?;
 
     let include = input.file_glob.as_deref().map(build_globset).transpose()?;
     let exclude = input
@@ -100,7 +105,7 @@ fn analyze(input: TaintInput) -> Result<TaintResponse> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let il = match build_il(&source, &input.language) {
+        let il = match build_il(&source, language) {
             Ok(il) => il,
             Err(_) => continue,
         };

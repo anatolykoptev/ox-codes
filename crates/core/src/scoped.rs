@@ -20,14 +20,21 @@ pub fn scoped_search(
 
     let scope = parse_scope_kind(&input.scope)?;
 
+    let language = input
+        .language
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("language is required for scoped search"))?;
+    let lang_name = language.to_string();
+
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(!input.case_sensitive)
         .build(&input.pattern)?;
 
-    let lang_cfg = get_language(&input.language)
-        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
-    let query_str = get_scope_query(&input.language, scope)
-        .ok_or_else(|| anyhow::anyhow!("no scope query for {}/{:?}", input.language, scope))?;
+    let lang_cfg = get_language(language)
+        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", language))?;
+    let query_str = get_scope_query(language, scope)
+        .ok_or_else(|| anyhow::anyhow!("no scope query for {}/{:?}", language, scope))?;
 
     let query = Arc::new(Query::new(&lang_cfg.language, query_str)?);
     let language = lang_cfg.language;
@@ -86,7 +93,7 @@ pub fn scoped_search(
             canonical_abs_path: canonical.clone(),
             mtime_nanos,
             file_len,
-            language: input.language.clone(),
+            language: lang_name.clone(),
             scope_kind: scope,
         };
 
@@ -106,7 +113,7 @@ pub fn scoped_search(
             &input.expand,
             input.max_tokens,
             input.format,
-            &input.language,
+            &lang_name,
         );
         all_matches.extend(file_matches);
 
@@ -249,7 +256,7 @@ type Config struct {
             root: root.into(),
             pattern: "TODO".into(),
             scope: "function_bodies".into(),
-            language: "go".into(),
+            language: Some("go".into()),
             is_regex: false,
             max_results: 50,
             case_sensitive: true,
