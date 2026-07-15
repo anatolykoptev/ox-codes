@@ -20,7 +20,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [package]
 name = "ox-codes"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -30,9 +30,9 @@ keywords = ["code-search", "ripgrep", "tree-sitter", "ast-grep", "dataflow"]
 categories = ["development-tools", "command-line-utilities", "web-programming::http-server"]
 
 [dependencies]
-ox-core = { path = "crates/core", version = "0.1.0" }
-ox-langs = { path = "crates/langs", version = "0.1.0" }
-ox-server = { path = "crates/server", version = "0.1.0" }
+ox-core = { path = "crates/core", version = "0.1.1" }
+ox-langs = { path = "crates/langs", version = "0.1.1" }
+ox-server = { path = "crates/server", version = "0.1.1" }
 clap = { version = "4", features = ["derive", "env"] }
 axum = "0.8"
 tokio.workspace = true

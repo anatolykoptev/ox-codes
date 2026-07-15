@@ -1,6 +1,6 @@
 [package]
 name = "ox-dataflow"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,7 +10,7 @@ keywords = ["dataflow", "taint-analysis", "static-analysis", "cfg", "code-analys
 categories = ["development-tools", "parsing"]
 
 [dependencies]
-ox-langs = { path = "../langs", version = "0.1.0" }
+ox-langs = { path = "../langs", version = "0.1.1" }
 tree-sitter = "0.26"
 tree-sitter-svelte-next = "0.1.1"
 tree-sitter-typescript = "0.23"
