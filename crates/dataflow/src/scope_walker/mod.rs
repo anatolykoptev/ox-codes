@@ -97,12 +97,13 @@ fn walk_as_typescript(
     // Walk the secondary tree; mark as non-svelte so we use compiled TS queries.
     let saved_svelte = ctx.is_svelte;
     let saved_offset = ctx.span_offset;
+    let saved_ts_secondary = ctx.is_ts_secondary;
     ctx.is_svelte = false;
     ctx.is_ts_secondary = true;
     ctx.span_offset = offset;
     walk_node(tree.root_node(), raw, q, stack, ctx);
     ctx.is_svelte = saved_svelte;
-    ctx.is_ts_secondary = false;
+    ctx.is_ts_secondary = saved_ts_secondary;
     ctx.span_offset = saved_offset;
 }
 
