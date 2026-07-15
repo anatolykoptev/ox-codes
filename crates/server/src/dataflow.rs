@@ -226,6 +226,7 @@ fn analyze_directory(input: DataflowInput, cache: &DataflowCache) -> Result<Data
     let (response, is_hit) =
         cache.get_or_insert(key, move || Ok(Arc::new(analyze_uncached(input)?)))?;
     let mut response = (*response).clone();
+    response.is_hit = is_hit;
     if is_hit {
         response.duration_ms = start.elapsed().as_millis() as u64;
     }
@@ -463,6 +464,7 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
         truncated,
         files_truncated,
         duration_ms: start.elapsed().as_millis() as u64,
+        is_hit: false,
     })
 }
 
@@ -779,12 +781,52 @@ function leaks() {
 
         let mut r1 = r1;
         r1.duration_ms = 0;
+        r1.is_hit = false;
         let mut r2 = r2;
         r2.duration_ms = 0;
+        r2.is_hit = false;
         assert_eq!(
             serde_json::to_value(&r1).unwrap(),
             serde_json::to_value(&r2).unwrap(),
-            "warm result must equal cold result"
+            "warm result must equal cold result (modulo is_hit + duration_ms)"
+        );
+    }
+
+    /// Verifies the `is_hit` observability signal (#48): a first/fresh call
+    /// reports `is_hit == false` (miss), and a second call on the same repo
+    /// reports `is_hit == true` (cache hit). Reverting the `is_hit` wiring
+    /// (always false) REDS this test: the second-call assertion fails.
+    #[test]
+    fn test_dataflow_response_is_hit_signal() {
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            let path = dir.path().join(format!("file{i}.ts"));
+            std::fs::write(&path, b"const x = 1;").unwrap();
+        }
+
+        let input = DataflowInput {
+            root: dir.path().to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: None,
+            file_glob: None,
+            exclude_glob: None,
+        };
+
+        let cache = DataflowCache::with_capacity(64 * 1024 * 1024);
+
+        let r1 = analyze_directory(input.clone(), &cache).unwrap();
+        assert!(
+            !r1.is_hit,
+            "first call (miss) must report is_hit=false, got {}",
+            r1.is_hit
+        );
+
+        let r2 = analyze_directory(input, &cache).unwrap();
+        assert!(
+            r2.is_hit,
+            "second call (hit) must report is_hit=true, got {}",
+            r2.is_hit
         );
     }
 
@@ -822,8 +864,10 @@ function leaks() {
 
         let mut r1 = r1;
         r1.duration_ms = 0;
+        r1.is_hit = false;
         let mut r2 = r2;
         r2.duration_ms = 0;
+        r2.is_hit = false;
         assert_eq!(
             serde_json::to_value(&r1).unwrap(),
             serde_json::to_value(&r2).unwrap()
@@ -844,6 +888,7 @@ function leaks() {
 
         let mut r3 = r3;
         r3.duration_ms = 0;
+        r3.is_hit = false;
         assert_ne!(
             serde_json::to_value(&r2).unwrap(),
             serde_json::to_value(&r3).unwrap(),
@@ -877,10 +922,13 @@ function leaks() {
 
         let mut cold = cold;
         cold.duration_ms = 0;
+        cold.is_hit = false;
         let mut warm1 = warm1;
         warm1.duration_ms = 0;
+        warm1.is_hit = false;
         let mut warm2 = warm2;
         warm2.duration_ms = 0;
+        warm2.is_hit = false;
         assert_eq!(
             serde_json::to_value(&cold).unwrap(),
             serde_json::to_value(&warm1).unwrap(),

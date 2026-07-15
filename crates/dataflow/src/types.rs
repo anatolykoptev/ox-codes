@@ -140,6 +140,13 @@ pub struct DataflowResponse {
     #[serde(default)]
     pub files_truncated: bool,
     pub duration_ms: u64,
+    /// True when this result was served from the dataflow cache (a hit),
+    /// false on a fresh compute (miss or cache-cold path). Lets a caller
+    /// distinguish a cached/stale-possible result from a freshly computed
+    /// one at the API boundary — an observability signal for the
+    /// mtime+len fingerprint + TTL staleness seam (#48).
+    #[serde(default)]
+    pub is_hit: bool,
 }
 
 fn default_max_results() -> usize {
