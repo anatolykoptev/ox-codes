@@ -1,7 +1,7 @@
 use axum::Json;
 use axum::http::StatusCode;
-use ox_core::{RewriteInput, RewriteResponse};
 use ox_core::rewrite;
+use ox_core::{RewriteInput, RewriteResponse};
 
 pub async fn handle(
     Json(input): Json<RewriteInput>,

@@ -4,8 +4,8 @@
 //! Synthetic entry/exit nodes bookend the graph so every path has a uniform
 //! start and end — required by the worklist solver.
 
-use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::Direction;
+use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
 
 use crate::il::Instr;

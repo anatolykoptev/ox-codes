@@ -1,38 +1,43 @@
 use tree_sitter::{Language, Parser};
 
-use crate::types::{ExpandedBlock, ExpandMode};
+use crate::types::{ExpandMode, ExpandedBlock};
 
 /// Node kinds that represent "function-like" symbols per language.
 const FUNCTION_KINDS: &[&str] = &[
-    "function_declaration",    // Go, JS
-    "method_declaration",      // Go, Java
-    "function_definition",     // Python, C, C++, Rust
-    "function_item",           // Rust
-    "method_definition",       // Python, Ruby, JS class methods
-    "arrow_function",          // JS/TS
-    "closure_expression",      // Rust, Swift
-    "func_literal",            // Go
+    "function_declaration", // Go, JS
+    "method_declaration",   // Go, Java
+    "function_definition",  // Python, C, C++, Rust
+    "function_item",        // Rust
+    "method_definition",    // Python, Ruby, JS class methods
+    "arrow_function",       // JS/TS
+    "closure_expression",   // Rust, Swift
+    "func_literal",         // Go
 ];
 
 /// Node kinds that represent "block-level" symbols (superset of functions).
 const BLOCK_KINDS: &[&str] = &[
     // Functions (all from above)
-    "function_declaration", "method_declaration", "function_definition",
-    "function_item", "method_definition", "arrow_function",
-    "closure_expression", "func_literal",
+    "function_declaration",
+    "method_declaration",
+    "function_definition",
+    "function_item",
+    "method_definition",
+    "arrow_function",
+    "closure_expression",
+    "func_literal",
     // Types / classes
-    "type_declaration",        // Go
-    "struct_item",             // Rust
-    "impl_item",               // Rust
-    "enum_item",               // Rust
-    "trait_item",              // Rust
-    "class_declaration",       // Java, JS, TS
-    "class_definition",        // Python
-    "interface_declaration",   // Java, TS
-    "struct_specifier",        // C/C++
-    "class_specifier",         // C++
-    "module",                  // Ruby
-    "namespace_declaration",   // C++, C#
+    "type_declaration",      // Go
+    "struct_item",           // Rust
+    "impl_item",             // Rust
+    "enum_item",             // Rust
+    "trait_item",            // Rust
+    "class_declaration",     // Java, JS, TS
+    "class_definition",      // Python
+    "interface_declaration", // Java, TS
+    "struct_specifier",      // C/C++
+    "class_specifier",       // C++
+    "module",                // Ruby
+    "namespace_declaration", // C++, C#
 ];
 
 pub fn find_enclosing_symbol(
@@ -49,7 +54,9 @@ pub fn find_enclosing_symbol(
     parser.set_language(language).ok()?;
     let tree = parser.parse(source, None)?;
 
-    let mut node = tree.root_node().descendant_for_byte_range(byte_offset, byte_offset)?;
+    let mut node = tree
+        .root_node()
+        .descendant_for_byte_range(byte_offset, byte_offset)?;
 
     let target_kinds: &[&str] = match mode {
         ExpandMode::Function => FUNCTION_KINDS,

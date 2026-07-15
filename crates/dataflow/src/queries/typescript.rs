@@ -1,5 +1,5 @@
-use tree_sitter::Language;
 use super::LangQueries;
+use tree_sitter::Language;
 
 pub struct TypescriptQueries {
     language: Language,
@@ -14,7 +14,9 @@ impl Default for TypescriptQueries {
 }
 
 impl TypescriptQueries {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl LangQueries for TypescriptQueries {
@@ -108,8 +110,7 @@ mod tests {
     #[test]
     fn calls_query_compiles() {
         let q = queries();
-        tree_sitter::Query::new(&q.language, q.calls_query())
-            .expect("calls query should compile");
+        tree_sitter::Query::new(&q.language, q.calls_query()).expect("calls query should compile");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use axum::Json;
 use axum::http::StatusCode;
-use ox_core::{StructuralSearchInput, ExpandedSearchResponse};
 use ox_core::structural;
+use ox_core::{ExpandedSearchResponse, StructuralSearchInput};
 
 pub async fn handle(
     Json(input): Json<StructuralSearchInput>,

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use ast_grep_core::matcher::{Pattern, PatternBuilder, PatternError};
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, TSLanguage};
 use ast_grep_core::{AstGrep, Language as AstLang, Matcher};
@@ -10,7 +10,7 @@ use ignore::WalkBuilder;
 use ox_langs::detect_language;
 
 use crate::grep_filter::build_globset;
-use crate::types::{ExpandedMatch, ExpandedSearchResponse, ExpandMode, StructuralSearchInput};
+use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, StructuralSearchInput};
 
 // ── Language wrapper ──────────────────────────────────────────────────────────
 
@@ -110,19 +110,10 @@ pub(crate) fn lang_wrapper(name: &str) -> Option<LangWrapper> {
             tree_sitter_typescript::LANGUAGE_TSX.into(),
             '$',
         )),
-        "java" => Some(LangWrapper::new(
-            tree_sitter_java::LANGUAGE.into(),
-            EXPANDO,
-        )),
+        "java" => Some(LangWrapper::new(tree_sitter_java::LANGUAGE.into(), EXPANDO)),
         "c" => Some(LangWrapper::new(tree_sitter_c::LANGUAGE.into(), EXPANDO)),
-        "cpp" | "c++" | "cxx" => Some(LangWrapper::new(
-            tree_sitter_cpp::LANGUAGE.into(),
-            EXPANDO,
-        )),
-        "ruby" | "rb" => Some(LangWrapper::new(
-            tree_sitter_ruby::LANGUAGE.into(),
-            EXPANDO,
-        )),
+        "cpp" | "c++" | "cxx" => Some(LangWrapper::new(tree_sitter_cpp::LANGUAGE.into(), EXPANDO)),
+        "ruby" | "rb" => Some(LangWrapper::new(tree_sitter_ruby::LANGUAGE.into(), EXPANDO)),
         "csharp" | "c#" | "cs" => Some(LangWrapper::new(
             tree_sitter_c_sharp::LANGUAGE.into(),
             EXPANDO,
@@ -131,14 +122,8 @@ pub(crate) fn lang_wrapper(name: &str) -> Option<LangWrapper> {
             tree_sitter_php::LANGUAGE_PHP.into(),
             EXPANDO,
         )),
-        "bash" | "sh" => Some(LangWrapper::new(
-            tree_sitter_bash::LANGUAGE.into(),
-            EXPANDO,
-        )),
-        "lua" => Some(LangWrapper::new(
-            tree_sitter_lua::LANGUAGE.into(),
-            EXPANDO,
-        )),
+        "bash" | "sh" => Some(LangWrapper::new(tree_sitter_bash::LANGUAGE.into(), EXPANDO)),
+        "lua" => Some(LangWrapper::new(tree_sitter_lua::LANGUAGE.into(), EXPANDO)),
         "swift" => Some(LangWrapper::new(
             tree_sitter_swift::LANGUAGE.into(),
             EXPANDO,
@@ -147,10 +132,7 @@ pub(crate) fn lang_wrapper(name: &str) -> Option<LangWrapper> {
             tree_sitter_kotlin_ng::LANGUAGE.into(),
             EXPANDO,
         )),
-        "zig" => Some(LangWrapper::new(
-            tree_sitter_zig::LANGUAGE.into(),
-            EXPANDO,
-        )),
+        "zig" => Some(LangWrapper::new(tree_sitter_zig::LANGUAGE.into(), EXPANDO)),
         _ => None,
     }
 }
@@ -160,10 +142,7 @@ pub(crate) fn lang_wrapper(name: &str) -> Option<LangWrapper> {
 /// Returns the file extension mapped to its canonical language name, or None.
 /// Used to compare against the requested language (including aliases).
 pub(crate) fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
-    let detected = path
-        .to_str()
-        .and_then(detect_language)
-        .unwrap_or_default();
+    let detected = path.to_str().and_then(detect_language).unwrap_or_default();
     if detected == lang_name {
         return true;
     }
@@ -241,10 +220,12 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchR
             .map_err(|e| anyhow::anyhow!("invalid pattern '{}': {e}", input.pattern))
     }?;
 
-    let include = input.file_glob.as_deref()
-        .map(build_globset).transpose()?;
-    let exclude = input.exclude_glob.as_deref()
-        .map(build_globset).transpose()?;
+    let include = input.file_glob.as_deref().map(build_globset).transpose()?;
+    let exclude = input
+        .exclude_glob
+        .as_deref()
+        .map(build_globset)
+        .transpose()?;
 
     let root = Path::new(&input.root);
     let mut all_matches: Vec<ExpandedMatch> = Vec::new();
@@ -494,7 +475,10 @@ func other() {
             format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
-        assert!(!result.matches.is_empty(), "$RECV.Method($$$) should match multi-arg method call");
+        assert!(
+            !result.matches.is_empty(),
+            "$RECV.Method($$$) should match multi-arg method call"
+        );
     }
 
     /// Additional regression: `$RECV.BulkInsert($$$)` matches `s.BulkInsert(ctx, a, b)`.
@@ -518,7 +502,10 @@ func other() {
             format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
-        assert!(!result.matches.is_empty(), "method call with ellipsis should match");
+        assert!(
+            !result.matches.is_empty(),
+            "method call with ellipsis should match"
+        );
     }
 
     /// Verify that plain function calls with ellipsis work correctly.
@@ -543,7 +530,10 @@ func other() {
             format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
-        assert!(!result.matches.is_empty(), "foo($$$) should match foo(ctx, a, b)");
+        assert!(
+            !result.matches.is_empty(),
+            "foo($$$) should match foo(ctx, a, b)"
+        );
     }
 
     /// Verify that `$RECV.Method()` (no-arg call) works despite the selector_expression issue.
@@ -567,7 +557,10 @@ func other() {
             format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
-        assert!(!result.matches.is_empty(), "$RECV.Method() should match no-arg method call");
+        assert!(
+            !result.matches.is_empty(),
+            "$RECV.Method() should match no-arg method call"
+        );
     }
 
     /// Workaround test: `$RECV.Method($X, $$$)` matches method calls with 1+ arguments.
@@ -593,7 +586,9 @@ func other() {
             format: crate::types::Format::Plain,
         };
         let result = structural_search(input).unwrap();
-        assert!(!result.matches.is_empty(), "$RECV.Method($X, $$$) should match multi-arg method call");
+        assert!(
+            !result.matches.is_empty(),
+            "$RECV.Method($X, $$$) should match multi-arg method call"
+        );
     }
-
 }

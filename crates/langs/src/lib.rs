@@ -7,11 +7,11 @@ mod java;
 mod kotlin;
 mod lua;
 mod php;
+pub mod preproc;
 mod python;
 mod ruby;
 mod rust_lang;
 mod svelte;
-pub mod preproc;
 mod swift;
 mod typescript;
 mod zig;
@@ -109,8 +109,22 @@ mod tests {
     use super::*;
 
     const ALL_LANGS: &[&str] = &[
-        "go", "rust", "python", "typescript", "svelte", "java", "c", "cpp", "ruby", "csharp",
-        "php", "bash", "lua", "swift", "kotlin", "zig",
+        "go",
+        "rust",
+        "python",
+        "typescript",
+        "svelte",
+        "java",
+        "c",
+        "cpp",
+        "ruby",
+        "csharp",
+        "php",
+        "bash",
+        "lua",
+        "swift",
+        "kotlin",
+        "zig",
     ];
 
     const ALL_SCOPES: &[ScopeKind] = &[

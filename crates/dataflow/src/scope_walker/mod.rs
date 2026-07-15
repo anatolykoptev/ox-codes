@@ -36,7 +36,8 @@ pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
 
     // Build a reusable TS parser for secondary parses (avoids per-expression alloc).
     let mut ts_parser = Parser::new();
-    let ts_lang_for_reuse: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    let ts_lang_for_reuse: tree_sitter::Language =
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     // Ignore error — if this fails, walk_as_typescript will handle gracefully.
     let _ = ts_parser.set_language(&ts_lang_for_reuse);
 
@@ -53,13 +54,15 @@ pub fn walk_file(source: &[u8], lang_name: &str) -> Result<ScopeChain> {
     while let Some(s) = stack.pop() {
         ctx.finished.push(s);
     }
-    Ok(ScopeChain { scopes: ctx.finished })
+    Ok(ScopeChain {
+        scopes: ctx.finished,
+    })
 }
 
 /// Build CompiledQueries for TypeScript (used for Svelte secondary parses).
 fn build_ts_queries(ts_lang: &tree_sitter::Language) -> Result<CompiledQueries> {
-    use crate::queries::typescript::TypescriptQueries;
     use crate::queries::LangQueries;
+    use crate::queries::typescript::TypescriptQueries;
     let tq = TypescriptQueries::new();
     Ok(CompiledQueries {
         decl: Query::new(ts_lang, tq.declarations_query())?,
@@ -82,7 +85,9 @@ fn walk_as_typescript(
     ctx: &mut WalkCtx,
 ) {
     // Reuse the parser stored in ctx — no per-call alloc.
-    let Some(tree) = ctx.ts_parser.parse(raw, None) else { return };
+    let Some(tree) = ctx.ts_parser.parse(raw, None) else {
+        return;
+    };
     // Walk the secondary tree; mark as non-svelte so we use compiled TS queries.
     let saved_svelte = ctx.is_svelte;
     let saved_offset = ctx.span_offset;
@@ -95,7 +100,11 @@ fn walk_as_typescript(
     ctx.span_offset = saved_offset;
 }
 
-struct CompiledQueries { decl: Query, assign: Query, param: Query }
+struct CompiledQueries {
+    decl: Query,
+    assign: Query,
+    param: Query,
+}
 struct WalkCtx {
     sid: u32,
     finished: Vec<Scope>,
@@ -109,8 +118,11 @@ struct WalkCtx {
 }
 
 fn walk_node(
-    node: Node, src: &[u8], q: &CompiledQueries,
-    stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
+    node: Node,
+    src: &[u8],
+    q: &CompiledQueries,
+    stack: &mut Vec<Scope>,
+    ctx: &mut WalkCtx,
 ) {
     let kind = node.kind();
 
@@ -161,9 +173,25 @@ fn walk_node(
             }
         }
         if is_decl_node(kind) {
-            collect_bindings(node, src, &q.decl, stack, &mut ctx.sid, false, ctx.span_offset);
+            collect_bindings(
+                node,
+                src,
+                &q.decl,
+                stack,
+                &mut ctx.sid,
+                false,
+                ctx.span_offset,
+            );
         } else if is_assign_node(kind) {
-            collect_bindings(node, src, &q.assign, stack, &mut ctx.sid, false, ctx.span_offset);
+            collect_bindings(
+                node,
+                src,
+                &q.assign,
+                stack,
+                &mut ctx.sid,
+                false,
+                ctx.span_offset,
+            );
         } else if ctx.is_ts_secondary && is_func_decl_node(kind) {
             // Bind the function name to the enclosing scope (not the function's own scope).
             bind_func_name(node, src, stack, &mut ctx.sid, ctx.span_offset);
@@ -174,13 +202,16 @@ fn walk_node(
         if cursor.goto_first_child() {
             loop {
                 walk_node(cursor.node(), src, q, stack, ctx);
-                if !cursor.goto_next_sibling() { break; }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
             }
         }
         if push.is_some()
-            && let Some(s) = stack.pop() {
-                ctx.finished.push(s);
-            }
+            && let Some(s) = stack.pop()
+        {
+            ctx.finished.push(s);
+        }
         return;
     }
 
@@ -189,7 +220,9 @@ fn walk_node(
     if cursor.goto_first_child() {
         loop {
             walk_node(cursor.node(), src, q, stack, ctx);
-            if !cursor.goto_next_sibling() { break; }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
 }
@@ -198,11 +231,16 @@ fn walk_node(
 
 /// Walk `<script>` element: find `raw_text` child and secondary-parse as TS.
 fn walk_svelte_script(
-    node: Node, src: &[u8], q: &CompiledQueries,
-    stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
+    node: Node,
+    src: &[u8],
+    q: &CompiledQueries,
+    stack: &mut Vec<Scope>,
+    ctx: &mut WalkCtx,
 ) {
     let mut cursor = node.walk();
-    if !cursor.goto_first_child() { return; }
+    if !cursor.goto_first_child() {
+        return;
+    }
     loop {
         let child = cursor.node();
         if child.kind() == "raw_text" {
@@ -210,17 +248,24 @@ fn walk_svelte_script(
             let offset = child.start_byte();
             walk_as_typescript(raw, offset, q, stack, ctx);
         }
-        if !cursor.goto_next_sibling() { break; }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
     }
 }
 
 /// Walk `expression` node: extract `svelte_raw_text` child and secondary-parse.
 fn walk_svelte_expression(
-    node: Node, src: &[u8], q: &CompiledQueries,
-    stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
+    node: Node,
+    src: &[u8],
+    q: &CompiledQueries,
+    stack: &mut Vec<Scope>,
+    ctx: &mut WalkCtx,
 ) {
     let mut cursor = node.walk();
-    if !cursor.goto_first_child() { return; }
+    if !cursor.goto_first_child() {
+        return;
+    }
     loop {
         let child = cursor.node();
         if child.kind() == "svelte_raw_text" {
@@ -228,15 +273,20 @@ fn walk_svelte_expression(
             let offset = child.start_byte();
             walk_as_typescript(raw, offset, q, stack, ctx);
         }
-        if !cursor.goto_next_sibling() { break; }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
     }
 }
 
 /// Walk `attribute` node: if attribute_name is a directive, secondary-parse
 /// the expression child; otherwise walk normally.
 fn walk_svelte_attribute(
-    node: Node, src: &[u8], q: &CompiledQueries,
-    stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
+    node: Node,
+    src: &[u8],
+    q: &CompiledQueries,
+    stack: &mut Vec<Scope>,
+    ctx: &mut WalkCtx,
 ) {
     use ox_langs::preproc::svelte_refs;
 
@@ -244,7 +294,9 @@ fn walk_svelte_attribute(
     let mut attr_name: Option<String> = None;
     let mut expressions: Vec<Node> = Vec::new();
     let mut cursor = node.walk();
-    if !cursor.goto_first_child() { return; }
+    if !cursor.goto_first_child() {
+        return;
+    }
     loop {
         let child = cursor.node();
         match child.kind() {
@@ -256,38 +308,41 @@ fn walk_svelte_attribute(
             }
             _ => {}
         }
-        if !cursor.goto_next_sibling() { break; }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
     }
 
     // If it's a directive that carries an expression, secondary-parse each.
     if let Some(name) = &attr_name
-        && let Some(directive) = svelte_refs::parse_directive(name) {
-            use svelte_refs::DirectiveKind;
-            match directive.kind {
-                DirectiveKind::EventHandler
-                | DirectiveKind::Action
-                | DirectiveKind::Binding
-                | DirectiveKind::Transition
-                | DirectiveKind::Animation
-                | DirectiveKind::Let => {
-                    for expr in &expressions {
-                        walk_svelte_expression(*expr, src, q, stack, ctx);
-                    }
-                    // If no expression: the directive name itself IS the identifier
-                    // (e.g. `use:drag` with no `={...}`) — record it as a reference.
-                    if expressions.is_empty() {
-                        record_name_as_reference(&directive.name, node, src, stack);
-                    }
+        && let Some(directive) = svelte_refs::parse_directive(name)
+    {
+        use svelte_refs::DirectiveKind;
+        match directive.kind {
+            DirectiveKind::EventHandler
+            | DirectiveKind::Action
+            | DirectiveKind::Binding
+            | DirectiveKind::Transition
+            | DirectiveKind::Animation
+            | DirectiveKind::Let => {
+                for expr in &expressions {
+                    walk_svelte_expression(*expr, src, q, stack, ctx);
                 }
-                DirectiveKind::Class | DirectiveKind::Style | DirectiveKind::Unknown => {
-                    // Boolean toggle directives — expression is the JS side.
-                    for expr in &expressions {
-                        walk_svelte_expression(*expr, src, q, stack, ctx);
-                    }
+                // If no expression: the directive name itself IS the identifier
+                // (e.g. `use:drag` with no `={...}`) — record it as a reference.
+                if expressions.is_empty() {
+                    record_name_as_reference(&directive.name, node, src, stack);
                 }
             }
-            return;
+            DirectiveKind::Class | DirectiveKind::Style | DirectiveKind::Unknown => {
+                // Boolean toggle directives — expression is the JS side.
+                for expr in &expressions {
+                    walk_svelte_expression(*expr, src, q, stack, ctx);
+                }
+            }
         }
+        return;
+    }
     // Plain attribute: walk expressions for completeness.
     for expr in &expressions {
         walk_svelte_expression(*expr, src, q, stack, ctx);
@@ -296,50 +351,67 @@ fn walk_svelte_attribute(
 
 /// Walk a block-start node that has a named field carrying the condition expr.
 fn walk_svelte_block_condition(
-    node: Node, field: &str, src: &[u8], q: &CompiledQueries,
-    stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
+    node: Node,
+    field: &str,
+    src: &[u8],
+    q: &CompiledQueries,
+    stack: &mut Vec<Scope>,
+    ctx: &mut WalkCtx,
 ) {
     if let Some(cond) = node.child_by_field_name(field)
-        && cond.kind() == "svelte_raw_text" {
-            let raw = &src[cond.byte_range()];
-            let offset = cond.start_byte();
-            walk_as_typescript(raw, offset, q, stack, ctx);
-        }
+        && cond.kind() == "svelte_raw_text"
+    {
+        let raw = &src[cond.byte_range()];
+        let offset = cond.start_byte();
+        walk_as_typescript(raw, offset, q, stack, ctx);
+    }
 }
 
 /// Walk `each_start` node: process the iterable expression (identifier field)
 /// and record the binding (parameter field) as a declared variable.
 fn walk_svelte_each_start(
-    node: Node, src: &[u8], q: &CompiledQueries,
-    stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
+    node: Node,
+    src: &[u8],
+    q: &CompiledQueries,
+    stack: &mut Vec<Scope>,
+    ctx: &mut WalkCtx,
 ) {
     // identifier field: the expression being iterated (e.g. `items`)
     if let Some(id_node) = node.child_by_field_name("identifier")
-        && id_node.kind() == "svelte_raw_text" {
-            let raw = &src[id_node.byte_range()];
-            let offset = id_node.start_byte();
-            walk_as_typescript(raw, offset, q, stack, ctx);
-        }
+        && id_node.kind() == "svelte_raw_text"
+    {
+        let raw = &src[id_node.byte_range()];
+        let offset = id_node.start_byte();
+        walk_as_typescript(raw, offset, q, stack, ctx);
+    }
     // parameter field: the binding name (e.g. `item`) — declare, don't reference
     if let Some(param_node) = node.child_by_field_name("parameter")
-        && param_node.kind() == "svelte_raw_text" {
-            let name = text_of(param_node, src).trim().to_string();
-            if !name.is_empty() {
-                ctx.sid += 1;
-                if let Some(scope) = stack.last_mut() {
-                    scope.vars.push(new_binding(name, ctx.sid, param_node, None, true, 0));
-                }
+        && param_node.kind() == "svelte_raw_text"
+    {
+        let name = text_of(param_node, src).trim().to_string();
+        if !name.is_empty() {
+            ctx.sid += 1;
+            if let Some(scope) = stack.last_mut() {
+                scope
+                    .vars
+                    .push(new_binding(name, ctx.sid, param_node, None, true, 0));
             }
         }
+    }
 }
 
 /// Walk all `svelte_raw_text` children of a node as TypeScript expressions.
 fn walk_svelte_raw_text_children(
-    node: Node, src: &[u8], q: &CompiledQueries,
-    stack: &mut Vec<Scope>, ctx: &mut WalkCtx,
+    node: Node,
+    src: &[u8],
+    q: &CompiledQueries,
+    stack: &mut Vec<Scope>,
+    ctx: &mut WalkCtx,
 ) {
     let mut cursor = node.walk();
-    if !cursor.goto_first_child() { return; }
+    if !cursor.goto_first_child() {
+        return;
+    }
     loop {
         let child = cursor.node();
         if child.kind() == "svelte_raw_text" {
@@ -347,7 +419,9 @@ fn walk_svelte_raw_text_children(
             let offset = child.start_byte();
             walk_as_typescript(raw, offset, q, stack, ctx);
         }
-        if !cursor.goto_next_sibling() { break; }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
     }
 }
 
@@ -368,17 +442,23 @@ fn record_name_as_reference(name: &str, node: Node, _src: &[u8], stack: &mut [Sc
 
 fn scope_kind_for(kind: &str) -> Option<ScopeKind> {
     match kind {
-        "function_declaration" | "function_definition" | "function_item"
-        | "method_declaration" | "method_definition" | "func_literal"
+        "function_declaration"
+        | "function_definition"
+        | "function_item"
+        | "method_declaration"
+        | "method_definition"
+        | "func_literal"
         | "arrow_function" => Some(ScopeKind::Function),
-        "for_statement" | "while_statement" | "for_range_statement"
-        | "for_in_clause" => Some(ScopeKind::Loop),
+        "for_statement" | "while_statement" | "for_range_statement" | "for_in_clause" => {
+            Some(ScopeKind::Loop)
+        }
         _ => None,
     }
 }
 
 fn is_decl_node(kind: &str) -> bool {
-    matches!(kind,
+    matches!(
+        kind,
         // Go
         "short_var_declaration" | "var_spec" | "var_declaration" | "assignment"
         // TypeScript / JavaScript (secondary parse of Svelte <script>)
@@ -387,7 +467,8 @@ fn is_decl_node(kind: &str) -> bool {
 }
 
 fn is_assign_node(kind: &str) -> bool {
-    matches!(kind,
+    matches!(
+        kind,
         // Go
         "assignment_statement" | "augmented_assignment"
         // TypeScript / JavaScript
@@ -396,7 +477,8 @@ fn is_assign_node(kind: &str) -> bool {
 }
 
 fn is_func_decl_node(kind: &str) -> bool {
-    matches!(kind,
+    matches!(
+        kind,
         // TypeScript / JavaScript named function declarations
         "function_declaration" | "generator_function_declaration"
     )
@@ -408,7 +490,9 @@ fn is_func_decl_node(kind: &str) -> bool {
 fn bind_func_name(node: Node, src: &[u8], stack: &mut [Scope], sid: &mut u32, offset: usize) {
     // The function name is the first  child of function_declaration.
     let mut cursor = node.walk();
-    if !cursor.goto_first_child() { return; }
+    if !cursor.goto_first_child() {
+        return;
+    }
     loop {
         let child = cursor.node();
         if child.kind() == "identifier" {
@@ -417,16 +501,24 @@ fn bind_func_name(node: Node, src: &[u8], stack: &mut [Scope], sid: &mut u32, of
             // Bind to the scope that encloses the function (second-to-last on stack,
             // since the Function scope was already pushed above us).
             let target_idx = if stack.len() >= 2 { stack.len() - 2 } else { 0 };
-            stack[target_idx].vars.push(new_binding(name, *sid, child, None, false, offset));
+            stack[target_idx]
+                .vars
+                .push(new_binding(name, *sid, child, None, false, offset));
             return;
         }
-        if !cursor.goto_next_sibling() { break; }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
     }
 }
 
 fn make_scope(kind: ScopeKind, node: Node, offset: usize) -> Scope {
     let sp = node_span(node, offset);
-    Scope { kind, vars: Vec::new(), span: sp }
+    Scope {
+        kind,
+        vars: Vec::new(),
+        span: sp,
+    }
 }
 
 fn node_span(node: Node, offset: usize) -> Span {
@@ -438,44 +530,87 @@ fn node_span(node: Node, offset: usize) -> Span {
     }
 }
 
-fn new_binding(name: String, sid: u32, node: Node, val: Option<ConstValue>, param: bool, offset: usize) -> VarBinding {
+fn new_binding(
+    name: String,
+    sid: u32,
+    node: Node,
+    val: Option<ConstValue>,
+    param: bool,
+    offset: usize,
+) -> VarBinding {
     VarBinding {
-        name, sid, def_site: node_span(node, offset), def_value: val,
-        taint_tags: SmallVec::new(), uses: Vec::new(), is_param: param,
+        name,
+        sid,
+        def_site: node_span(node, offset),
+        def_value: val,
+        taint_tags: SmallVec::new(),
+        uses: Vec::new(),
+        is_param: param,
     }
 }
 
 fn collect_params(
-    node: Node, src: &[u8], query: &Query, stack: &mut [Scope], sid: &mut u32, offset: usize,
+    node: Node,
+    src: &[u8],
+    query: &Query,
+    stack: &mut [Scope],
+    sid: &mut u32,
+    offset: usize,
 ) {
-    let Some(ni) = query.capture_index_for_name("name") else { return };
+    let Some(ni) = query.capture_index_for_name("name") else {
+        return;
+    };
     let mut qc = QueryCursor::new();
     let mut matches = qc.matches(query, node, src);
     while let Some(m) = matches.next() {
         for cap in m.captures.iter().filter(|c| c.index == ni) {
             *sid += 1;
             if let Some(scope) = stack.last_mut() {
-                scope.vars.push(new_binding(text_of(cap.node, src), *sid, cap.node, None, true, offset));
+                scope.vars.push(new_binding(
+                    text_of(cap.node, src),
+                    *sid,
+                    cap.node,
+                    None,
+                    true,
+                    offset,
+                ));
             }
         }
     }
 }
 
 fn collect_bindings(
-    node: Node, src: &[u8], query: &Query,
-    stack: &mut [Scope], sid: &mut u32, param: bool, offset: usize,
+    node: Node,
+    src: &[u8],
+    query: &Query,
+    stack: &mut [Scope],
+    sid: &mut u32,
+    param: bool,
+    offset: usize,
 ) {
-    let Some(ni) = query.capture_index_for_name("name") else { return };
+    let Some(ni) = query.capture_index_for_name("name") else {
+        return;
+    };
     let vi = query.capture_index_for_name("value");
     let mut qc = QueryCursor::new();
     let mut matches = qc.matches(query, node, src);
     while let Some(m) = matches.next() {
-        let Some(nc) = m.captures.iter().find(|c| c.index == ni) else { continue };
-        let val = vi.and_then(|i| m.captures.iter().find(|c| c.index == i))
+        let Some(nc) = m.captures.iter().find(|c| c.index == ni) else {
+            continue;
+        };
+        let val = vi
+            .and_then(|i| m.captures.iter().find(|c| c.index == i))
             .and_then(|vc| try_const(vc.node, src));
         *sid += 1;
         if let Some(scope) = stack.last_mut() {
-            scope.vars.push(new_binding(text_of(nc.node, src), *sid, nc.node, val, param, offset));
+            scope.vars.push(new_binding(
+                text_of(nc.node, src),
+                *sid,
+                nc.node,
+                val,
+                param,
+                offset,
+            ));
         }
     }
 }
@@ -494,17 +629,24 @@ fn record_reference(node: Node, src: &[u8], stack: &mut [Scope], offset: usize) 
 }
 
 fn text_of(node: Node, src: &[u8]) -> String {
-    std::str::from_utf8(&src[node.byte_range()]).unwrap_or("").to_string()
+    std::str::from_utf8(&src[node.byte_range()])
+        .unwrap_or("")
+        .to_string()
 }
 
 fn try_const(node: Node, src: &[u8]) -> Option<ConstValue> {
     match node.kind() {
         "int_literal" | "integer" => text_of(node, src).parse::<i64>().ok().map(ConstValue::Int),
-        "float_literal" | "float" => text_of(node, src).parse::<f64>().ok().map(ConstValue::Float),
-        "interpreted_string_literal" | "raw_string_literal" | "string" =>
-            Some(ConstValue::Str(text_of(node, src))),
-        "true" | "false" | "True" | "False" =>
-            Some(ConstValue::Bool(node.kind().starts_with(['t', 'T']))),
+        "float_literal" | "float" => text_of(node, src)
+            .parse::<f64>()
+            .ok()
+            .map(ConstValue::Float),
+        "interpreted_string_literal" | "raw_string_literal" | "string" => {
+            Some(ConstValue::Str(text_of(node, src)))
+        }
+        "true" | "false" | "True" | "False" => {
+            Some(ConstValue::Bool(node.kind().starts_with(['t', 'T'])))
+        }
         "nil" | "None" | "null" => Some(ConstValue::Nil),
         _ => None,
     }

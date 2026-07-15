@@ -5,14 +5,14 @@
 /// Svelte directive prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectiveKind {
-    EventHandler,  // on:event
-    Action,        // use:action
-    Binding,       // bind:target
-    Transition,    // transition:fn, in:fn, out:fn
-    Animation,     // animate:fn
-    Let,           // let:name
-    Class,         // class:name
-    Style,         // style:prop
+    EventHandler, // on:event
+    Action,       // use:action
+    Binding,      // bind:target
+    Transition,   // transition:fn, in:fn, out:fn
+    Animation,    // animate:fn
+    Let,          // let:name
+    Class,        // class:name
+    Style,        // style:prop
     Unknown,
 }
 
@@ -51,7 +51,11 @@ pub fn parse_directive(attribute_name: &str) -> Option<Directive> {
         "style" => DirectiveKind::Style,
         _ => DirectiveKind::Unknown,
     };
-    Some(Directive { kind, name, modifiers })
+    Some(Directive {
+        kind,
+        name,
+        modifiers,
+    })
 }
 
 #[cfg(test)]

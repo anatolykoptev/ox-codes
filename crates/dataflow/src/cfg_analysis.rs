@@ -10,7 +10,7 @@ use crate::cfg_builder::build_cfg;
 use crate::def_use::build_def_use_chains;
 use crate::il::IlFunction;
 use crate::il_builder::build_il;
-use crate::reaching_defs::{reaching_definitions, Definition};
+use crate::reaching_defs::{Definition, reaching_definitions};
 use crate::types::{Finding, FindingKind, Severity};
 
 /// Run all CFG-based analyses on source code.
@@ -44,10 +44,7 @@ fn dead_stores_cfg(cfg: &Cfg, func: &IlFunction, file: &str) -> Vec<Finding> {
         .map(|c| Finding {
             kind: FindingKind::DeadStore,
             severity: Severity::Warning,
-            message: format!(
-                "variable `{}` is assigned but never used",
-                c.def.name.ident
-            ),
+            message: format!("variable `{}` is assigned but never used", c.def.name.ident),
             file: file.to_string(),
             span: c.def.span,
             variable: c.def.name.ident.clone(),
@@ -82,16 +79,12 @@ fn uninitialized_vars(cfg: &Cfg, func: &IlFunction, file: &str) -> Vec<Finding> 
         // For each use, check if any def of this variable is in the IN set.
         for u in &chain.uses {
             let in_set = &result.in_sets[u.block.index()];
-            let has_reaching_def =
-                has_def_in_set(&defs, var_name, in_set);
+            let has_reaching_def = has_def_in_set(&defs, var_name, in_set);
             if !has_reaching_def {
                 findings.push(Finding {
                     kind: FindingKind::UninitializedVar,
                     severity: Severity::Warning,
-                    message: format!(
-                        "variable `{}` may be used before initialization",
-                        var_name
-                    ),
+                    message: format!("variable `{}` may be used before initialization", var_name),
                     file: file.to_string(),
                     span: u.span,
                     variable: var_name.clone(),
@@ -103,13 +96,8 @@ fn uninitialized_vars(cfg: &Cfg, func: &IlFunction, file: &str) -> Vec<Finding> 
 }
 
 /// Check whether any definition of `var_name` is set in the bitset.
-fn has_def_in_set(
-    defs: &[Definition],
-    var_name: &str,
-    set: &fixedbitset::FixedBitSet,
-) -> bool {
-    defs.iter()
-        .any(|d| d.name.ident == var_name && set[d.id])
+fn has_def_in_set(defs: &[Definition], var_name: &str, set: &fixedbitset::FixedBitSet) -> bool {
+    defs.iter().any(|d| d.name.ident == var_name && set[d.id])
 }
 
 /// Detect blocks not reachable from entry.
@@ -145,15 +133,23 @@ mod tests {
 
     #[test]
     fn dead_store_overwritten() {
-        let f = go_findings(b"package main\nfunc foo() {\n    x := 1\n    x = 2\n    fmt.Println(x)\n}");
-        let dead = f.iter().filter(|f| f.kind == FindingKind::DeadStore && f.variable == "x").count();
+        let f = go_findings(
+            b"package main\nfunc foo() {\n    x := 1\n    x = 2\n    fmt.Println(x)\n}",
+        );
+        let dead = f
+            .iter()
+            .filter(|f| f.kind == FindingKind::DeadStore && f.variable == "x")
+            .count();
         assert!(dead >= 1, "x:=1 should be a dead store, got: {f:?}");
     }
 
     #[test]
     fn no_false_positive_for_used_var() {
         let f = go_findings(b"package main\nfunc foo() {\n    x := 1\n    fmt.Println(x)\n}");
-        let dead: Vec<_> = f.iter().filter(|f| f.kind == FindingKind::DeadStore && f.variable == "x").collect();
+        let dead: Vec<_> = f
+            .iter()
+            .filter(|f| f.kind == FindingKind::DeadStore && f.variable == "x")
+            .collect();
         assert!(dead.is_empty(), "x is used, no dead store: {dead:?}");
     }
 
@@ -167,14 +163,22 @@ mod tests {
     #[test]
     fn unreachable_empty_for_normal_func() {
         let f = go_findings(b"package main\nfunc foo() {\n    x := 1\n    fmt.Println(x)\n}");
-        let ur: Vec<_> = f.iter().filter(|f| f.kind == FindingKind::UnreachableCode).collect();
+        let ur: Vec<_> = f
+            .iter()
+            .filter(|f| f.kind == FindingKind::UnreachableCode)
+            .collect();
         assert!(ur.is_empty(), "normal func has no unreachable code: {ur:?}");
     }
 
     #[test]
     fn analyze_cfg_combines_all() {
-        let f = go_findings(b"package main\nfunc foo() {\n    x := 1\n    y := 2\n    fmt.Println(y)\n}");
-        assert!(f.iter().any(|f| f.kind == FindingKind::DeadStore && f.variable == "x"),
-            "x should be dead store: {f:?}");
+        let f = go_findings(
+            b"package main\nfunc foo() {\n    x := 1\n    y := 2\n    fmt.Println(y)\n}",
+        );
+        assert!(
+            f.iter()
+                .any(|f| f.kind == FindingKind::DeadStore && f.variable == "x"),
+            "x should be dead store: {f:?}"
+        );
     }
 }

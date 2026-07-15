@@ -28,8 +28,7 @@ pub fn build_cfg(func: &IlFunction) -> Cfg {
             Instr::Branch { .. } => {
                 // Flush pending instructions into a block.
                 if !current_instrs.is_empty() {
-                    let block =
-                        cfg.add_block(std::mem::take(&mut current_instrs), None);
+                    let block = cfg.add_block(std::mem::take(&mut current_instrs), None);
                     cfg.add_edge(prev_block, block, EdgeKind::Fallthrough);
                     prev_block = block;
                 }
@@ -40,16 +39,14 @@ pub fn build_cfg(func: &IlFunction) -> Cfg {
             }
             Instr::Return { .. } => {
                 current_instrs.push(instr.clone());
-                let block =
-                    cfg.add_block(std::mem::take(&mut current_instrs), None);
+                let block = cfg.add_block(std::mem::take(&mut current_instrs), None);
                 cfg.add_edge(prev_block, block, EdgeKind::Fallthrough);
                 cfg.add_edge(block, cfg.exit, EdgeKind::Fallthrough);
                 prev_block = block;
             }
             Instr::Jump { .. } => {
                 current_instrs.push(instr.clone());
-                let block =
-                    cfg.add_block(std::mem::take(&mut current_instrs), None);
+                let block = cfg.add_block(std::mem::take(&mut current_instrs), None);
                 cfg.add_edge(prev_block, block, EdgeKind::Fallthrough);
                 // TODO: loop tracking for back-edges (break/continue).
                 prev_block = block;
@@ -144,12 +141,7 @@ mod tests {
     #[test]
     fn function_with_branch() {
         // x = 1; if true; y = 2; return
-        let cfg = build_cfg(&il_func(vec![
-            assign("x"),
-            branch(),
-            assign("y"),
-            ret(),
-        ]));
+        let cfg = build_cfg(&il_func(vec![assign("x"), branch(), assign("y"), ret()]));
         // entry → block(x=1) → decision(branch) → block(y=2, return) → exit
         assert_eq!(cfg.block_count(), 5); // entry, exit, x=1, branch, y=2+ret
     }

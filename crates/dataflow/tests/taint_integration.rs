@@ -14,11 +14,7 @@ fn analyze_taint_source(source: &str, lang: &str) -> Vec<TaintFinding> {
     findings
 }
 
-fn analyze_with_rules(
-    source: &str,
-    lang: &str,
-    rules: &[TaintRule],
-) -> Vec<TaintFinding> {
+fn analyze_with_rules(source: &str, lang: &str, rules: &[TaintRule]) -> Vec<TaintFinding> {
     let il = build_il(source.as_bytes(), lang).unwrap();
     let mut findings = Vec::new();
     for func in &il.functions {
@@ -75,7 +71,10 @@ func handler() {
 }"#;
     let rules = vec![sql_injection_rule_with_query_sink()];
     let findings = analyze_with_rules(src, "go", &rules);
-    assert!(!findings.is_empty(), "should detect SQL injection: {findings:?}");
+    assert!(
+        !findings.is_empty(),
+        "should detect SQL injection: {findings:?}"
+    );
     assert!(
         findings.iter().any(|f| f.sink.cwe == "CWE-89"),
         "should have CWE-89 finding"

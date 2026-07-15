@@ -17,11 +17,21 @@ fn py_il(src: &str) -> ox_dataflow::il::IlFile {
 }
 
 fn span() -> Span {
-    Span { start_byte: 0, end_byte: 1, start_line: 1, end_line: 1 }
+    Span {
+        start_byte: 0,
+        end_byte: 1,
+        start_line: 1,
+        end_line: 1,
+    }
 }
 
 fn il_func(body: Vec<Instr>) -> IlFunction {
-    IlFunction { name: "t".into(), params: vec![], body, span: span() }
+    IlFunction {
+        name: "t".into(),
+        params: vec![],
+        body,
+        span: span(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -32,7 +42,10 @@ fn il_func(body: Vec<Instr>) -> IlFunction {
 fn empty_go_function_produces_empty_body() {
     let il = go_il("package main\nfunc empty() {}");
     assert_eq!(il.functions.len(), 1, "should find exactly one function");
-    assert!(il.functions[0].body.is_empty(), "empty func body must be empty");
+    assert!(
+        il.functions[0].body.is_empty(),
+        "empty func body must be empty"
+    );
 }
 
 #[test]
@@ -50,7 +63,8 @@ fn nested_go_functions_both_captured() {
 
 #[test]
 fn multiple_returns_all_become_instr_return() {
-    let src = "package main\nfunc multi(x int) int {\n\tif x > 0 {\n\t\treturn 1\n\t}\n\treturn 0\n}";
+    let src =
+        "package main\nfunc multi(x int) int {\n\tif x > 0 {\n\t\treturn 1\n\t}\n\treturn 0\n}";
     let il = go_il(src);
     let returns: Vec<_> = il.functions[0]
         .body
@@ -94,7 +108,9 @@ fn method_call_on_receiver_has_field_offset() {
         // func should be Lval(obj.Method) with Field("Method") offset.
         if let Expr::Lval(lval) = func {
             assert!(
-                lval.offsets.iter().any(|o| matches!(o, Offset::Field(f) if f == "Method")),
+                lval.offsets
+                    .iter()
+                    .any(|o| matches!(o, Offset::Field(f) if f == "Method")),
                 "must have Field(\"Method\") offset, got: {lval:?}"
             );
         } else {
@@ -138,8 +154,14 @@ fn multi_assign_captures_first_lhs_only() {
         })
         .collect();
     // Documents the known limitation: only "a" is captured.
-    assert!(assigns.contains(&"a".to_string()), "first LHS must be captured");
-    assert!(!assigns.contains(&"b".to_string()), "second LHS not captured (known limitation)");
+    assert!(
+        assigns.contains(&"a".to_string()),
+        "first LHS must be captured"
+    );
+    assert!(
+        !assigns.contains(&"b".to_string()),
+        "second LHS not captured (known limitation)"
+    );
 }
 
 #[test]
@@ -171,7 +193,11 @@ fn python_augmented_assign_becomes_assign() {
         .iter()
         .filter(|i| matches!(i, Instr::Assign { .. }))
         .collect();
-    assert!(assigns.len() >= 2, "both x=1 and x+=1 must become Assign, got {}", assigns.len());
+    assert!(
+        assigns.len() >= 2,
+        "both x=1 and x+=1 must become Assign, got {}",
+        assigns.len()
+    );
 }
 
 #[test]
@@ -187,7 +213,9 @@ fn selector_expression_produces_lval_with_field_offset() {
     if let Instr::Assign { rval, .. } = &assigns[0] {
         if let Expr::Lval(lval) = rval {
             assert!(
-                lval.offsets.iter().any(|o| matches!(o, Offset::Field(f) if f == "Value")),
+                lval.offsets
+                    .iter()
+                    .any(|o| matches!(o, Offset::Field(f) if f == "Value")),
                 "selector must have Field(\"Value\") offset: {lval:?}"
             );
         } else {
@@ -202,13 +230,19 @@ fn selector_expression_produces_lval_with_field_offset() {
 
 #[test]
 fn cfg_return_only_function_has_entry_block_exit() {
-    let ret = Instr::Return { value: None, span: span() };
+    let ret = Instr::Return {
+        value: None,
+        span: span(),
+    };
     let cfg = build_cfg(&il_func(vec![ret]));
     // entry -> [return block] -> exit = 3 nodes
     assert_eq!(cfg.block_count(), 3, "entry + return_block + exit");
     assert_eq!(cfg.successors(cfg.entry).len(), 1);
     let ret_block = cfg.successors(cfg.entry)[0];
-    assert!(cfg.successors(ret_block).contains(&cfg.exit), "return block must reach exit");
+    assert!(
+        cfg.successors(ret_block).contains(&cfg.exit),
+        "return block must reach exit"
+    );
 }
 
 #[test]
@@ -225,15 +259,22 @@ fn cfg_multiple_branches_correct_block_count() {
     };
     let body = vec![
         assign("x"),
-        branch(),          // first if
+        branch(), // first if
         assign("y"),
-        branch(),          // else if
+        branch(), // else if
         assign("z"),
-        Instr::Return { value: None, span: span() },
+        Instr::Return {
+            value: None,
+            span: span(),
+        },
     ];
     let cfg = build_cfg(&il_func(body));
     // Minimum: entry + exit + blocks for each segment
-    assert!(cfg.block_count() >= 5, "must have multiple blocks for branches, got {}", cfg.block_count());
+    assert!(
+        cfg.block_count() >= 5,
+        "must have multiple blocks for branches, got {}",
+        cfg.block_count()
+    );
     // Both branches must exist as separate decision blocks
     let mut branch_count = 0;
     for idx in cfg.graph.node_indices() {
@@ -243,7 +284,10 @@ fn cfg_multiple_branches_correct_block_count() {
             }
         }
     }
-    assert_eq!(branch_count, 2, "two Branch instructions must be in separate decision blocks");
+    assert_eq!(
+        branch_count, 2,
+        "two Branch instructions must be in separate decision blocks"
+    );
 }
 
 #[test]
@@ -271,17 +315,26 @@ fn cfg_empty_function_has_exactly_two_nodes() {
 fn cfg_branch_and_return_exit_reachable() {
     // branch then return — exit must be reachable from entry
     let body = vec![
-        Instr::Branch { cond: Expr::Const(Const::Bool(true)), span: span() },
+        Instr::Branch {
+            cond: Expr::Const(Const::Bool(true)),
+            span: span(),
+        },
         Instr::Assign {
             lval: Lval::var(Name::new("x", 1)),
             rval: Expr::Const(Const::Int(1)),
             span: span(),
         },
-        Instr::Return { value: None, span: span() },
+        Instr::Return {
+            value: None,
+            span: span(),
+        },
     ];
     let cfg = build_cfg(&il_func(body));
     // Verify exit is reachable via reverse_postorder (all reachable nodes).
     let rpo = cfg.reverse_postorder();
-    assert!(rpo.contains(&cfg.exit), "exit must be reachable when function has return");
+    assert!(
+        rpo.contains(&cfg.exit),
+        "exit must be reachable when function has return"
+    );
     assert_eq!(rpo[0], cfg.entry, "RPO must start with entry");
 }

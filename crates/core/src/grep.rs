@@ -6,8 +6,8 @@ use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::WalkBuilder;
 
-use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, SearchInput, SearchMatch};
 use crate::grep_filter::{build_globset, lang_extensions, matches_language};
+use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, SearchInput, SearchMatch};
 
 pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
     let start = Instant::now();
@@ -17,11 +17,7 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
         .fixed_strings(!input.is_regex)
         .build(&input.pattern)?;
 
-    let include_globset = input
-        .file_glob
-        .as_deref()
-        .map(build_globset)
-        .transpose()?;
+    let include_globset = input.file_glob.as_deref().map(build_globset).transpose()?;
 
     let exclude_globset = input
         .exclude_glob
@@ -29,10 +25,7 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
         .map(build_globset)
         .transpose()?;
 
-    let lang_exts: Option<&[&str]> = input
-        .language
-        .as_deref()
-        .and_then(lang_extensions);
+    let lang_exts: Option<&[&str]> = input.language.as_deref().and_then(lang_extensions);
 
     let ctx_lines = input.context_lines;
     let root = Path::new(&input.root);
@@ -160,10 +153,7 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
         .collect();
 
     // Flatten and truncate
-    let all_matches: Vec<ExpandedMatch> = expanded_per_file
-        .into_iter()
-        .flatten()
-        .collect();
+    let all_matches: Vec<ExpandedMatch> = expanded_per_file.into_iter().flatten().collect();
 
     let total_matches = all_matches.len();
     let truncated = total_matches > input.max_results;
@@ -204,11 +194,7 @@ struct CollectSink {
 impl Sink for CollectSink {
     type Error = std::io::Error;
 
-    fn matched(
-        &mut self,
-        _searcher: &Searcher,
-        mat: &SinkMatch<'_>,
-    ) -> Result<bool, Self::Error> {
+    fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
         let text = String::from_utf8_lossy(mat.bytes()).trim_end().to_string();
         let line = mat.line_number().unwrap_or(0) as usize;
         let context = std::mem::take(&mut self.context_buf);
@@ -269,7 +255,11 @@ mod tests {
     #[test]
     fn test_literal_search() {
         let dir = TempDir::new().unwrap();
-        write_file(&dir, "main.go", "func HandleRequest(w http.ResponseWriter) {}");
+        write_file(
+            &dir,
+            "main.go",
+            "func HandleRequest(w http.ResponseWriter) {}",
+        );
         let resp = search(make_input(dir.path().to_str().unwrap(), "HandleRequest")).unwrap();
         assert_eq!(resp.matches.len(), 1);
         assert!(resp.matches[0].text.contains("HandleRequest"));
@@ -366,7 +356,11 @@ mod tests {
     #[test]
     fn test_grep_with_expand_function() {
         let dir = TempDir::new().unwrap();
-        write_file(&dir, "main.go", "package main\n\nfunc handler() {\n    doQuery()\n}\n");
+        write_file(
+            &dir,
+            "main.go",
+            "package main\n\nfunc handler() {\n    doQuery()\n}\n",
+        );
         let mut inp = make_input(dir.path().to_str().unwrap(), "doQuery");
         inp.expand = ExpandMode::Function;
         let resp = search(inp).unwrap();
@@ -379,7 +373,11 @@ mod tests {
     #[test]
     fn test_expand_markdown_wraps_body() {
         let dir = TempDir::new().unwrap();
-        write_file(&dir, "main.go", "package main\nfunc Foo() { x := 1\n_ = x\n}\n");
+        write_file(
+            &dir,
+            "main.go",
+            "package main\nfunc Foo() { x := 1\n_ = x\n}\n",
+        );
         let inp = SearchInput {
             root: dir.path().to_str().unwrap().into(),
             pattern: "Foo".into(),
@@ -397,7 +395,11 @@ mod tests {
         let resp = search(inp).unwrap();
         assert!(!resp.matches.is_empty(), "expected match");
         let body = &resp.matches[0].expanded.as_ref().unwrap().body;
-        assert!(body.starts_with("```go"), "expected markdown fence, got: {}", &body[..body.len().min(50)]);
+        assert!(
+            body.starts_with("```go"),
+            "expected markdown fence, got: {}",
+            &body[..body.len().min(50)]
+        );
         assert!(body.ends_with("```"), "expected closing fence");
     }
 }

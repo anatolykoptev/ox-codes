@@ -1,5 +1,5 @@
-use tree_sitter::Language;
 use super::LangQueries;
+use tree_sitter::Language;
 
 pub struct RustQueries {
     language: Language,
@@ -14,7 +14,9 @@ impl Default for RustQueries {
 }
 
 impl RustQueries {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl LangQueries for RustQueries {
@@ -108,8 +110,7 @@ mod tests {
     #[test]
     fn calls_query_compiles() {
         let q = queries();
-        tree_sitter::Query::new(&q.language, q.calls_query())
-            .expect("calls query should compile");
+        tree_sitter::Query::new(&q.language, q.calls_query()).expect("calls query should compile");
     }
 
     #[test]
@@ -185,7 +186,8 @@ mod tests {
         let matches = collect_captures(&query, tree.root_node(), src);
         assert!(!matches.is_empty(), "should match call_expression");
         let func_idx = query.capture_index_for_name("func").unwrap();
-        let func_text = matches[0].iter()
+        let func_text = matches[0]
+            .iter()
             .find(|(i, _)| *i == func_idx)
             .map(|(_, t)| t.as_str())
             .unwrap_or("");
@@ -203,7 +205,11 @@ mod tests {
         let matches = collect_captures(&query, tree.root_node(), src);
         assert!(!matches.is_empty(), "should capture mut parameter");
         let name_idx = query.capture_index_for_name("name").unwrap();
-        let name = matches[0].iter().find(|(i, _)| *i == name_idx).map(|(_, t)| t.as_str()).unwrap();
+        let name = matches[0]
+            .iter()
+            .find(|(i, _)| *i == name_idx)
+            .map(|(_, t)| t.as_str())
+            .unwrap();
         assert_eq!(name, "x");
     }
 }

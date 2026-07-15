@@ -195,28 +195,24 @@ mod tests {
 
     #[test]
     fn default_max_files_is_2000() {
-        let input: DataflowInput = serde_json::from_str(
-            r#"{"root":"/tmp","language":"typescript"}"#,
-        )
-        .unwrap();
+        let input: DataflowInput =
+            serde_json::from_str(r#"{"root":"/tmp","language":"typescript"}"#).unwrap();
         assert_eq!(input.max_files, Some(DEFAULT_MAX_FILES));
     }
 
     #[test]
     fn max_files_can_be_overridden() {
-        let input: DataflowInput = serde_json::from_str(
-            r#"{"root":"/tmp","language":"typescript","max_files":50}"#,
-        )
-        .unwrap();
+        let input: DataflowInput =
+            serde_json::from_str(r#"{"root":"/tmp","language":"typescript","max_files":50}"#)
+                .unwrap();
         assert_eq!(input.max_files, Some(50));
     }
 
     #[test]
     fn max_files_can_be_disabled() {
-        let input: DataflowInput = serde_json::from_str(
-            r#"{"root":"/tmp","language":"typescript","max_files":null}"#,
-        )
-        .unwrap();
+        let input: DataflowInput =
+            serde_json::from_str(r#"{"root":"/tmp","language":"typescript","max_files":null}"#)
+                .unwrap();
         assert_eq!(input.max_files, None);
     }
 }

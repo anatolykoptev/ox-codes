@@ -3,38 +3,59 @@
 use std::collections::{HashSet, VecDeque};
 
 use crate::cfg::Cfg;
-use crate::def_use::{build_def_use_chains, DefUseChain};
+use crate::def_use::{DefUseChain, build_def_use_chains};
 use crate::il::{Expr, Instr, Offset};
-use crate::types::{Severity, Span};
 pub use crate::taint_rules::TaintRule;
+use crate::types::{Severity, Span};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct TaintSource { pub pattern: String, pub tag: String }
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct TaintSink {
-    pub pattern: String, pub arg_index: i32, pub cwe: String, pub description: String,
+pub struct TaintSource {
+    pub pattern: String,
+    pub tag: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct Sanitizer { pub pattern: String }
+pub struct TaintSink {
+    pub pattern: String,
+    pub arg_index: i32,
+    pub cwe: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct Sanitizer {
+    pub pattern: String,
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct TaintSourceInfo { pub function: String, pub span: Span }
+pub struct TaintSourceInfo {
+    pub function: String,
+    pub span: Span,
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TaintSinkInfo {
-    pub function: String, pub span: Span, pub arg_index: i32, pub cwe: String,
+    pub function: String,
+    pub span: Span,
+    pub arg_index: i32,
+    pub cwe: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TaintFinding {
-    pub rule_id: String, pub source: TaintSourceInfo, pub sink: TaintSinkInfo,
-    pub severity: Severity, pub message: String, pub file: String,
+    pub rule_id: String,
+    pub source: TaintSourceInfo,
+    pub sink: TaintSinkInfo,
+    pub severity: Severity,
+    pub message: String,
+    pub file: String,
 }
 
 pub fn analyze_taint(cfg: &Cfg, rules: &[TaintRule], file: &str) -> Vec<TaintFinding> {
-    let chains = match build_def_use_chains(cfg) { Some(c) => c, None => return vec![] };
+    let chains = match build_def_use_chains(cfg) {
+        Some(c) => c,
+        None => return vec![],
+    };
     let mut findings = Vec::new();
     for rule in rules {
         let tainted_defs = find_tainted_defs(cfg, &rule.sources);
@@ -47,11 +68,16 @@ pub fn analyze_taint(cfg: &Cfg, rules: &[TaintRule], file: &str) -> Vec<TaintFin
                 _ => Severity::Info,
             };
             let msg = format!(
-                "Tainted data from `{}` flows to `{}` ({})", src.function, snk.function, rule.id
+                "Tainted data from `{}` flows to `{}` ({})",
+                src.function, snk.function, rule.id
             );
             findings.push(TaintFinding {
-                rule_id: rule.id.clone(), source: src, sink: snk,
-                severity, message: msg, file: file.to_string(),
+                rule_id: rule.id.clone(),
+                source: src,
+                sink: snk,
+                severity,
+                message: msg,
+                file: file.to_string(),
             });
         }
     }
@@ -70,12 +96,23 @@ pub(crate) fn func_name(expr: &Expr) -> Option<String> {
     }
 }
 
-fn matches_pattern(name: &str, pattern: &str) -> bool { name == pattern || name.ends_with(pattern) }
+fn matches_pattern(name: &str, pattern: &str) -> bool {
+    name == pattern || name.ends_with(pattern)
+}
 
 fn source_call_info(instr: &Instr) -> Option<(&Expr, Span)> {
     match instr {
-        Instr::Call { result: Some(_), func, span, .. } => Some((func, *span)),
-        Instr::Assign { rval: Expr::Call { func, .. }, span, .. } => Some((func, *span)),
+        Instr::Call {
+            result: Some(_),
+            func,
+            span,
+            ..
+        } => Some((func, *span)),
+        Instr::Assign {
+            rval: Expr::Call { func, .. },
+            span,
+            ..
+        } => Some((func, *span)),
         _ => None,
     }
 }
@@ -86,22 +123,37 @@ fn find_tainted_defs(cfg: &Cfg, sources: &[TaintSource]) -> Vec<(usize, TaintSou
     for idx in cfg.graph.node_indices() {
         for instr in &cfg.graph[idx].instrs {
             let is_def = matches!(
-                instr, Instr::Assign { .. } | Instr::Call { result: Some(_), .. }
+                instr,
+                Instr::Assign { .. }
+                    | Instr::Call {
+                        result: Some(_),
+                        ..
+                    }
             );
             if let Some((func, span)) = source_call_info(instr)
                 && let Some(fname) = func_name(func)
                 && sources.iter().any(|s| matches_pattern(&fname, &s.pattern))
             {
-                result.push((def_id, TaintSourceInfo { function: fname, span }));
+                result.push((
+                    def_id,
+                    TaintSourceInfo {
+                        function: fname,
+                        span,
+                    },
+                ));
             }
-            if is_def { def_id += 1; }
+            if is_def {
+                def_id += 1;
+            }
         }
     }
     result
 }
 
 fn propagate_taint(
-    tainted_defs: &[(usize, TaintSourceInfo)], chains: &[DefUseChain], cfg: &Cfg,
+    tainted_defs: &[(usize, TaintSourceInfo)],
+    chains: &[DefUseChain],
+    cfg: &Cfg,
 ) -> HashSet<String> {
     let mut tainted = HashSet::new();
     let mut queue = VecDeque::new();
@@ -144,9 +196,15 @@ fn find_sanitized_vars(cfg: &Cfg, sanitizers: &[Sanitizer]) -> HashSet<String> {
     let mut result = HashSet::new();
     for idx in cfg.graph.node_indices() {
         for instr in &cfg.graph[idx].instrs {
-            if let Instr::Call { result: Some(lval), func, .. } = instr
+            if let Instr::Call {
+                result: Some(lval),
+                func,
+                ..
+            } = instr
                 && let Some(fname) = func_name(func)
-                && sanitizers.iter().any(|s| matches_pattern(&fname, &s.pattern))
+                && sanitizers
+                    .iter()
+                    .any(|s| matches_pattern(&fname, &s.pattern))
                 && let Some(n) = lval.name()
             {
                 result.insert(n.ident.clone());
@@ -157,25 +215,39 @@ fn find_sanitized_vars(cfg: &Cfg, sanitizers: &[Sanitizer]) -> HashSet<String> {
 }
 
 fn find_taint_at_sinks(
-    cfg: &Cfg, sinks: &[TaintSink],
-    tainted: &HashSet<String>, sanitized: &HashSet<String>,
+    cfg: &Cfg,
+    sinks: &[TaintSink],
+    tainted: &HashSet<String>,
+    sanitized: &HashSet<String>,
 ) -> Vec<(TaintSourceInfo, TaintSinkInfo)> {
     let mut results = Vec::new();
     for idx in cfg.graph.node_indices() {
         for instr in &cfg.graph[idx].instrs {
             let (func, args, span) = match instr {
-                Instr::Call { func, args, span, .. } => (func, args, span),
+                Instr::Call {
+                    func, args, span, ..
+                } => (func, args, span),
                 _ => continue,
             };
-            let fname = match func_name(func) { Some(f) => f, None => continue };
+            let fname = match func_name(func) {
+                Some(f) => f,
+                None => continue,
+            };
             for sink in sinks {
-                if !matches_pattern(&fname, &sink.pattern) { continue; }
+                if !matches_pattern(&fname, &sink.pattern) {
+                    continue;
+                }
                 if is_arg_tainted(args, sink.arg_index, tainted, sanitized) {
                     results.push((
-                        TaintSourceInfo { function: "source".into(), span: *span },
+                        TaintSourceInfo {
+                            function: "source".into(),
+                            span: *span,
+                        },
                         TaintSinkInfo {
-                            function: fname.clone(), span: *span,
-                            arg_index: sink.arg_index, cwe: sink.cwe.clone(),
+                            function: fname.clone(),
+                            span: *span,
+                            arg_index: sink.arg_index,
+                            cwe: sink.cwe.clone(),
                         },
                     ));
                 }
@@ -186,7 +258,10 @@ fn find_taint_at_sinks(
 }
 
 fn is_arg_tainted(
-    args: &[Expr], idx: i32, tainted: &HashSet<String>, sanitized: &HashSet<String>,
+    args: &[Expr],
+    idx: i32,
+    tainted: &HashSet<String>,
+    sanitized: &HashSet<String>,
 ) -> bool {
     let check = |e: &Expr| -> bool {
         if let Expr::Lval(lval) = e
@@ -196,6 +271,9 @@ fn is_arg_tainted(
         }
         false
     };
-    if idx < 0 { args.iter().any(check) }
-    else { args.get(idx as usize).is_some_and(check) }
+    if idx < 0 {
+        args.iter().any(check)
+    } else {
+        args.get(idx as usize).is_some_and(check)
+    }
 }

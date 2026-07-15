@@ -28,47 +28,66 @@ fn go_rules() -> Vec<TaintRule> {
         TaintRule {
             id: "sql-injection".into(),
             sources: vec![
-                TaintSource { pattern: "FormValue".into(), tag: "user_input".into() },
-                TaintSource { pattern: "Query".into(), tag: "user_input".into() },
-                TaintSource { pattern: "ReadAll".into(), tag: "user_input".into() },
-                TaintSource { pattern: "Getenv".into(), tag: "env".into() },
-            ],
-            sinks: vec![
-                TaintSink {
-                    pattern: "Exec".into(),
-                    arg_index: 0,
-                    cwe: "CWE-89".into(),
-                    description: "SQL injection".into(),
+                TaintSource {
+                    pattern: "FormValue".into(),
+                    tag: "user_input".into(),
+                },
+                TaintSource {
+                    pattern: "Query".into(),
+                    tag: "user_input".into(),
+                },
+                TaintSource {
+                    pattern: "ReadAll".into(),
+                    tag: "user_input".into(),
+                },
+                TaintSource {
+                    pattern: "Getenv".into(),
+                    tag: "env".into(),
                 },
             ],
+            sinks: vec![TaintSink {
+                pattern: "Exec".into(),
+                arg_index: 0,
+                cwe: "CWE-89".into(),
+                description: "SQL injection".into(),
+            }],
             sanitizers: vec![
-                Sanitizer { pattern: "EscapeString".into() },
-                Sanitizer { pattern: "QuoteIdentifier".into() },
+                Sanitizer {
+                    pattern: "EscapeString".into(),
+                },
+                Sanitizer {
+                    pattern: "QuoteIdentifier".into(),
+                },
             ],
             severity: "error".into(),
         },
         TaintRule {
             id: "command-injection".into(),
             sources: vec![
-                TaintSource { pattern: "FormValue".into(), tag: "user_input".into() },
-                TaintSource { pattern: "ReadAll".into(), tag: "user_input".into() },
-            ],
-            sinks: vec![
-                TaintSink {
-                    pattern: "Command".into(),
-                    arg_index: -1,
-                    cwe: "CWE-78".into(),
-                    description: "OS command injection".into(),
+                TaintSource {
+                    pattern: "FormValue".into(),
+                    tag: "user_input".into(),
+                },
+                TaintSource {
+                    pattern: "ReadAll".into(),
+                    tag: "user_input".into(),
                 },
             ],
+            sinks: vec![TaintSink {
+                pattern: "Command".into(),
+                arg_index: -1,
+                cwe: "CWE-78".into(),
+                description: "OS command injection".into(),
+            }],
             sanitizers: vec![],
             severity: "error".into(),
         },
         TaintRule {
             id: "xss".into(),
-            sources: vec![
-                TaintSource { pattern: "FormValue".into(), tag: "user_input".into() },
-            ],
+            sources: vec![TaintSource {
+                pattern: "FormValue".into(),
+                tag: "user_input".into(),
+            }],
             sinks: vec![
                 TaintSink {
                     pattern: "Fprintf".into(),
@@ -84,8 +103,12 @@ fn go_rules() -> Vec<TaintRule> {
                 },
             ],
             sanitizers: vec![
-                Sanitizer { pattern: "EscapeString".into() },
-                Sanitizer { pattern: "HTMLEscapeString".into() },
+                Sanitizer {
+                    pattern: "EscapeString".into(),
+                },
+                Sanitizer {
+                    pattern: "HTMLEscapeString".into(),
+                },
             ],
             severity: "warning".into(),
         },
@@ -98,25 +121,30 @@ fn python_rules() -> Vec<TaintRule> {
         TaintRule {
             id: "sql-injection".into(),
             sources: vec![
-                TaintSource { pattern: "input".into(), tag: "user_input".into() },
-                TaintSource { pattern: "getenv".into(), tag: "env".into() },
-            ],
-            sinks: vec![
-                TaintSink {
-                    pattern: "execute".into(),
-                    arg_index: 0,
-                    cwe: "CWE-89".into(),
-                    description: "SQL injection".into(),
+                TaintSource {
+                    pattern: "input".into(),
+                    tag: "user_input".into(),
+                },
+                TaintSource {
+                    pattern: "getenv".into(),
+                    tag: "env".into(),
                 },
             ],
+            sinks: vec![TaintSink {
+                pattern: "execute".into(),
+                arg_index: 0,
+                cwe: "CWE-89".into(),
+                description: "SQL injection".into(),
+            }],
             sanitizers: vec![],
             severity: "error".into(),
         },
         TaintRule {
             id: "command-injection".into(),
-            sources: vec![
-                TaintSource { pattern: "input".into(), tag: "user_input".into() },
-            ],
+            sources: vec![TaintSource {
+                pattern: "input".into(),
+                tag: "user_input".into(),
+            }],
             sinks: vec![
                 TaintSink {
                     pattern: "system".into(),

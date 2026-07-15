@@ -9,7 +9,7 @@ use petgraph::graph::NodeIndex;
 
 use crate::cfg::Cfg;
 use crate::il::{Instr, Name};
-use crate::solver::{solve_forward, DataFlowProblem, DataFlowResult};
+use crate::solver::{DataFlowProblem, DataFlowResult, solve_forward};
 use crate::types::Span;
 
 /// A definition: variable + location + block.
@@ -176,10 +176,7 @@ func foo() {
         // The in-set of y's block should contain x's definition bit.
         // If x and y are in the same block, the OUT set will have both.
         let out = &result.out_sets[y_def.block.index()];
-        assert!(
-            out[x_def.id],
-            "def of x should reach block containing y"
-        );
+        assert!(out[x_def.id], "def of x should reach block containing y");
     }
 
     #[test]

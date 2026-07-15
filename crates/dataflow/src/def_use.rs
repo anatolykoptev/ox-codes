@@ -4,7 +4,7 @@ use petgraph::graph::NodeIndex;
 
 use crate::cfg::Cfg;
 use crate::il::{Expr, Instr, Name};
-use crate::reaching_defs::{reaching_definitions, Definition};
+use crate::reaching_defs::{Definition, reaching_definitions};
 use crate::types::Span;
 
 /// A use of a variable.
@@ -154,8 +154,10 @@ mod tests {
 
     #[test]
     fn simple_chain() {
-        let cfg = cfg_from_go(br#"package main
-func foo() { x := 1; y := x + 2; _ = y }"#);
+        let cfg = cfg_from_go(
+            br#"package main
+func foo() { x := 1; y := x + 2; _ = y }"#,
+        );
         let chains = build_def_use_chains(&cfg).unwrap();
         let x_chain = chains.iter().find(|c| c.def.name.ident == "x").unwrap();
         assert!(!x_chain.uses.is_empty(), "x should have uses");
@@ -163,8 +165,10 @@ func foo() { x := 1; y := x + 2; _ = y }"#);
 
     #[test]
     fn redefinition_kills() {
-        let cfg = cfg_from_go(br#"package main
-func foo() { x := 1; x = 2; fmt.Println(x) }"#);
+        let cfg = cfg_from_go(
+            br#"package main
+func foo() { x := 1; x = 2; fmt.Println(x) }"#,
+        );
         let chains = build_def_use_chains(&cfg).unwrap();
         let x_chains: Vec<_> = chains.iter().filter(|c| c.def.name.ident == "x").collect();
         assert!(x_chains.len() >= 2, "need at least 2 defs of x");
@@ -172,8 +176,10 @@ func foo() { x := 1; x = 2; fmt.Println(x) }"#);
 
     #[test]
     fn no_uses_produces_chain() {
-        let cfg = cfg_from_go(br#"package main
-func foo() { x := 1; _ = x }"#);
+        let cfg = cfg_from_go(
+            br#"package main
+func foo() { x := 1; _ = x }"#,
+        );
         let chains = build_def_use_chains(&cfg).unwrap();
         assert!(!chains.is_empty());
     }
