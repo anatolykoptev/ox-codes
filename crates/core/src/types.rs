@@ -102,15 +102,41 @@ pub struct RewriteInput {
 pub struct RewriteResponse {
     pub files: Vec<RewriteFileResult>,
     pub total_matches: usize,
+    /// Total edits dropped because their byte range overlapped/nested with an
+    /// already-accepted edit (mirrors ast-grep CLI's conflicting-edit skip).
+    /// `total_matches` counts only edits ACTUALLY applied.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub total_skipped: usize,
     pub total_files: usize,
     pub duration_ms: u64,
+    /// Files whose re-parse invariant failed and were NOT persisted. The batch
+    /// continues past these (F2) so valid files still land; the bad ones are
+    /// reported here instead of the whole call returning a 400.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<RewriteRejection>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RewriteFileResult {
     pub file: String,
     pub matches: usize,
+    /// Edits skipped for this file due to overlapping/nested match ranges.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped: usize,
     pub diff: String,
+}
+
+/// A file rejected from a `/rewrite apply=true` batch because its post-edit
+/// re-parse invariant failed (new ERROR/MISSING nodes). The file is left
+/// untouched on disk; the batch continues with the remaining files.
+#[derive(Debug, Serialize)]
+pub struct RewriteRejection {
+    pub file: String,
+    pub reason: String,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize)]
