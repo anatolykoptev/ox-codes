@@ -1,5 +1,5 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -114,6 +114,94 @@ fn build_key(input: &DataflowInput, canonical_root: &Path) -> Result<DataflowCac
     })
 }
 
+struct FilteredWalk<'a> {
+    walk: ignore::Walk,
+    root: &'a Path,
+    lang_cfg: &'a ox_langs::LangConfig,
+    include: Option<&'a GlobSet>,
+    exclude: Option<&'a GlobSet>,
+    max_files: Option<usize>,
+    count: usize,
+    truncated: bool,
+}
+
+impl<'a> FilteredWalk<'a> {
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+impl Iterator for FilteredWalk<'_> {
+    type Item = (PathBuf, String, std::fs::Metadata);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.max_files.is_some_and(|cap| self.count >= cap) {
+            self.truncated = true;
+            return None;
+        }
+
+        for result in self.walk.by_ref() {
+            let entry = result.ok()?;
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+
+            let path = entry.path().to_path_buf();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !self.lang_cfg.extensions.contains(&ext) {
+                continue;
+            }
+
+            let rel_path = path.strip_prefix(self.root).unwrap_or(&path);
+            if let Some(inc) = self.include
+                && !inc.is_match(rel_path)
+            {
+                continue;
+            }
+            if let Some(exc) = self.exclude
+                && exc.is_match(rel_path)
+            {
+                continue;
+            }
+
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            if self.max_files.is_some_and(|cap| self.count >= cap) {
+                self.truncated = true;
+                return None;
+            }
+
+            self.count += 1;
+            let rel_str = rel_path.to_string_lossy().into_owned();
+            return Some((path, rel_str, metadata));
+        }
+
+        None
+    }
+}
+
+fn filtered_walk<'a>(
+    root: &'a Path,
+    lang_cfg: &'a ox_langs::LangConfig,
+    include: Option<&'a GlobSet>,
+    exclude: Option<&'a GlobSet>,
+    max_files: Option<usize>,
+) -> FilteredWalk<'a> {
+    FilteredWalk {
+        walk: WalkBuilder::new(root).standard_filters(true).build(),
+        root,
+        lang_cfg,
+        include,
+        exclude,
+        max_files,
+        count: 0,
+        truncated: false,
+    }
+}
+
 fn compute_fingerprint(
     root: &Path,
     lang_cfg: &ox_langs::LangConfig,
@@ -121,41 +209,9 @@ fn compute_fingerprint(
     exclude: Option<&GlobSet>,
     max_files: Option<usize>,
 ) -> Result<u64> {
-    let mut hasher = DefaultHasher::new();
-    let mut count = 0;
+    let mut aggregate: u64 = 0;
 
-    for entry in WalkBuilder::new(root)
-        .standard_filters(true)
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-    {
-        if max_files.is_some_and(|cap| count >= cap) {
-            break;
-        }
-
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !lang_cfg.extensions.contains(&ext) {
-            continue;
-        }
-
-        let rel_path = path.strip_prefix(root).unwrap_or(path);
-        if let Some(inc) = include
-            && !inc.is_match(rel_path)
-        {
-            continue;
-        }
-        if let Some(exc) = exclude
-            && exc.is_match(rel_path)
-        {
-            continue;
-        }
-
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+    for (_path, rel, metadata) in filtered_walk(root, lang_cfg, include, exclude, max_files) {
         let mtime_nanos = metadata
             .modified()
             .unwrap_or(UNIX_EPOCH)
@@ -164,14 +220,14 @@ fn compute_fingerprint(
             .as_nanos();
         let file_len = metadata.len();
 
-        let rel_str = rel_path.to_string_lossy();
-        rel_str.as_bytes().hash(&mut hasher);
+        let mut hasher = DefaultHasher::new();
+        rel.as_bytes().hash(&mut hasher);
         mtime_nanos.hash(&mut hasher);
         file_len.hash(&mut hasher);
-        count += 1;
+        aggregate ^= hasher.finish();
     }
 
-    Ok(hasher.finish())
+    Ok(aggregate)
 }
 
 fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
@@ -191,40 +247,15 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut files_analyzed: usize = 0;
 
-    let mut files_truncated = false;
-    for entry in WalkBuilder::new(root)
-        .standard_filters(true)
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-    {
-        // File cap: stop walking once limit is reached.
-        if let Some(cap) = input.max_files
-            && files_analyzed >= cap
-        {
-            files_truncated = true;
-            break;
-        }
-
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !lang_cfg.extensions.contains(&ext) {
-            continue;
-        }
-
-        let rel_path = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include
-            && !inc.is_match(rel_path)
-        {
-            continue;
-        }
-        if let Some(ref exc) = exclude
-            && exc.is_match(rel_path)
-        {
-            continue;
-        }
-
-        let source = match std::fs::read(path) {
+    let mut walk = filtered_walk(
+        root,
+        &lang_cfg,
+        include.as_ref(),
+        exclude.as_ref(),
+        input.max_files,
+    );
+    for (path, rel, _metadata) in walk.by_ref() {
+        let source = match std::fs::read(&path) {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -234,8 +265,7 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
             Err(_) => continue,
         };
 
-        let rel_str = rel_path.to_string_lossy();
-        let findings = analysis::analyze(&chain, &rel_str);
+        let findings = analysis::analyze(&chain, &rel);
         all_findings.extend(findings);
         files_analyzed += 1;
 
@@ -243,6 +273,7 @@ fn analyze_uncached(input: DataflowInput) -> Result<DataflowResponse> {
             break;
         }
     }
+    let files_truncated = walk.truncated();
 
     let total = all_findings.len();
     let truncated = total > input.max_results;
@@ -353,6 +384,64 @@ function leaks() {
             "svelte file should not be skipped; files_analyzed={}",
             result.files_analyzed
         );
+    }
+
+    /// Regression test for the cap-counting divergence between fingerprint and
+    /// analysis. An unreadable middle file must still count toward the max_files
+    /// cap so the shared filtered walk cuts both callers at the same file.
+    #[cfg(unix)]
+    #[test]
+    fn test_filtered_walk_counts_read_failures_toward_cap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("file1.ts");
+        let f2 = dir.path().join("file2.ts");
+        let f3 = dir.path().join("file3.ts");
+        std::fs::write(&f1, b"const x = 1;").unwrap();
+        std::fs::write(&f2, b"const y = 2;").unwrap();
+        std::fs::write(&f3, b"const z = 3;").unwrap();
+
+        std::fs::set_permissions(&f2, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // If reading the file still succeeds, the test is running in an
+        // environment (e.g. as root) where permissions cannot be dropped.
+        if std::fs::read(&f2).is_ok() {
+            std::fs::set_permissions(&f2, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+
+        let lang_cfg = get_language("typescript").unwrap();
+        let root = dir.path();
+        let mut walk = filtered_walk(root, &lang_cfg, None, None, Some(2));
+        let paths: Vec<_> = walk.by_ref().map(|(_, rel, _)| rel).collect();
+        let truncated = walk.truncated();
+        assert_eq!(paths, vec!["file1.ts", "file2.ts"]);
+        assert!(
+            truncated,
+            "shared walk should truncate at the cap after file2"
+        );
+
+        let input = DataflowInput {
+            root: root.to_string_lossy().into_owned(),
+            language: "typescript".to_string(),
+            max_results: 100,
+            max_files: Some(2),
+            file_glob: None,
+            exclude_glob: None,
+        };
+        let cache = DataflowCache::new();
+        let result = analyze_directory(input, &cache).unwrap();
+        assert_eq!(
+            result.files_analyzed, 1,
+            "only file1 should be analyzed; file2 is unreadable and consumes the second cap slot"
+        );
+        assert!(
+            result.files_truncated,
+            "analysis should be truncated at the cap after file2"
+        );
+
+        std::fs::set_permissions(&f2, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     /// Verifies the cache hit contract: first call is a miss + one analysis,

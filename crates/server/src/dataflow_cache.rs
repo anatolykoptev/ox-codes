@@ -49,10 +49,29 @@ pub struct DataflowCache {
 
 impl DataflowCache {
     pub fn new() -> Self {
-        let capacity = std::env::var(CACHE_ENTRIES_ENV)
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_CAPACITY);
+        let raw = std::env::var(CACHE_ENTRIES_ENV).ok();
+        let capacity = match raw.as_deref().and_then(|s| s.parse::<usize>().ok()) {
+            Some(0) => {
+                tracing::warn!(
+                    "{}=0 is a useless cache capacity; using default {}",
+                    CACHE_ENTRIES_ENV,
+                    DEFAULT_CAPACITY
+                );
+                DEFAULT_CAPACITY
+            }
+            Some(c) => c,
+            None => {
+                if let Some(ref value) = raw {
+                    tracing::warn!(
+                        "{}={:?} is unparseable; using default {}",
+                        CACHE_ENTRIES_ENV,
+                        value,
+                        DEFAULT_CAPACITY
+                    );
+                }
+                DEFAULT_CAPACITY
+            }
+        };
         Self::with_capacity(capacity)
     }
 
