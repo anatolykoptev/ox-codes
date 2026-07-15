@@ -10,7 +10,7 @@ use tree_sitter::Query;
 use crate::grep_filter::build_globset;
 use crate::scope_cache::{CacheKey, CachedScopes, ScopeCache};
 use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, ScopedSearchInput};
-use ox_langs::{get_language, get_scope_query};
+use ox_langs::{get_language, get_scope_query, language_id};
 
 pub fn scoped_search(
     input: ScopedSearchInput,
@@ -26,8 +26,10 @@ pub fn scoped_search(
 
     let lang_cfg = get_language(&input.language)
         .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
-    let query_str = get_scope_query(&input.language, scope)
-        .ok_or_else(|| anyhow::anyhow!("no scope query for {}/{:?}", input.language, scope))?;
+    let canonical_id = language_id(&input.language)
+        .ok_or_else(|| anyhow::anyhow!("unsupported language: {}", input.language))?;
+    let query_str = get_scope_query(canonical_id, scope)
+        .ok_or_else(|| anyhow::anyhow!("no scope query for {}/{:?}", canonical_id, scope))?;
 
     let query = Arc::new(Query::new(&lang_cfg.language, query_str)?);
     let language = lang_cfg.language;
@@ -86,13 +88,13 @@ pub fn scoped_search(
             canonical_abs_path: canonical.clone(),
             mtime_nanos,
             file_len,
-            language: input.language.clone(),
+            language: canonical_id.to_string(),
             scope_kind: scope,
         };
 
         let query_ref = Arc::clone(&query);
         let lang = language.clone();
-        let cached = cache.get_or_insert(key, move || {
+        let (cached, _is_hit) = cache.get_or_insert(key, move || {
             let source = std::fs::read(&canonical)?;
             let scopes = ScopeCache::parse_scopes(source, &query_ref, &lang)?;
             Ok(Arc::new(scopes))
@@ -106,7 +108,7 @@ pub fn scoped_search(
             &input.expand,
             input.max_tokens,
             input.format,
-            &input.language,
+            canonical_id,
         );
         all_matches.extend(file_matches);
 
@@ -338,6 +340,33 @@ type Config struct {
         assert_eq!(m2, 3, "second run should have no additional misses");
         assert_eq!(h2, 3, "second run should hit all three files");
         assert_eq!(run1.matches, run2.matches);
+    }
+
+    #[test]
+    fn test_cache_alias_key() {
+        let dir = setup_go_repo_three();
+        let cache = ScopeCache::with_capacity(64 * 1024 * 1024);
+        let root = dir.path().to_string_lossy().into_owned();
+        let input = go_input(&root);
+
+        let _ = scoped_search(input.clone(), &cache).unwrap();
+        let (_, m1) = cache.stats();
+        assert_eq!(
+            m1, 3,
+            "first run with canonical 'go' should parse all files"
+        );
+
+        let alias_input = ScopedSearchInput {
+            language: "golang".into(),
+            ..input
+        };
+        let _ = scoped_search(alias_input, &cache).unwrap();
+        let (h2, m2) = cache.stats();
+        assert_eq!(m2, 3, "alias 'golang' should not create additional misses");
+        assert_eq!(
+            h2, 3,
+            "alias 'golang' should hit the canonical 'go' entries"
+        );
     }
 
     #[test]
