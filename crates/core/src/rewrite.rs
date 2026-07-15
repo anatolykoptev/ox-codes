@@ -161,8 +161,6 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         // surfaces the dropped count.
         let (accepted, skipped) = resolve_overlaps(edits);
         let applied = accepted.len();
-        total_matches += applied;
-        total_skipped += skipped;
 
         let modified = apply_edits(&src, accepted);
 
@@ -210,6 +208,17 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         }
 
         let diff = unified_diff(&rel_path, &src, &modified);
+
+        // Re-review (#53): count only PERSISTED files. Incrementing before the
+        // post-write re-parse invariant would (a) over-report total_matches
+        // (rejected files inflate it, contradicting the API contract) and
+        // (b) let the max_results early-exit below fire on PHANTOM rejected
+        // matches — breaking the walk so a valid later file is never processed
+        // and lands in neither files[] nor rejected[] (a silent lost rewrite,
+        // the exact #41 class). A rejected file `continue`s above and never
+        // reaches here, so counting here is correct for both apply and dry-run.
+        total_matches += applied;
+        total_skipped += skipped;
 
         files.push(RewriteFileResult {
             file: rel_path,
@@ -724,6 +733,15 @@ mod tests {
         assert!(result.files[0].file.contains("valid.js"));
         assert_eq!(result.rejected.len(), 1, "the bad file must be in rejected");
         assert!(result.rejected[0].file.contains("bad.js"));
+        // Re-review (#53): aggregates count only PERSISTED files — the rejected
+        // bad.js must NOT inflate total_matches (it would to 2 if counted before
+        // the invariant), which is also what keeps the max_results early-exit
+        // from breaking the walk on a phantom rejected match (silent-loss #41).
+        assert_eq!(
+            result.total_matches, 1,
+            "total_matches must count only the persisted file, not the rejected one"
+        );
+        assert_eq!(result.total_skipped, 0);
     }
 
     /// F6 (#53): `resolve_overlaps` tie-break at equal start position must
