@@ -13,7 +13,8 @@ const DATAFLOW_TIMEOUT_SECS: u64 = 25;
 /// `DATAFLOW_TIMEOUT_SECS` (25s) is tuned for read-only analysis; a bulk
 /// rewrite (up to 10_000 files × read+parse+persist) can legitimately exceed
 /// it, so the pre-PR3 unbounded `/rewrite` now falsely 504'd on a normal large
-/// rewrite. This generous deadline (operator-tunable) restores the pre-PR
+/// rewrite. This generous deadline (a compile-time default — raise it and
+/// recompile for an unusually large repo) restores the pre-PR
 /// behavior — a legitimate rewrite completes and returns 200 — while keeping
 /// the 503 acquire-timeout + the walk caps. Note: `spawn_blocking` is still
 /// uncancellable, so a 504 from `/rewrite` means the rewrite MAY have
@@ -281,6 +282,27 @@ mod semaphore_tests {
             "available_permits {} should not exceed SEMAPHORE_PERMITS {}",
             WALK_SEMAPHORE.available_permits(),
             SEMAPHORE_PERMITS
+        );
+    }
+
+    /// `guarded_walk_with_deadline` (the `/rewrite` entry) must 504 when the
+    /// closure outlives the request deadline. Guards against transposing the
+    /// `acquire_timeout` / `request_timeout` args in the `guarded_walk_inner`
+    /// call — both are `Duration` and positionally adjacent, so a swap compiles
+    /// silently and would mis-time the deadline.
+    #[tokio::test]
+    async fn guarded_walk_with_deadline_504_on_short_deadline() {
+        let result: Result<(), (StatusCode, String)> =
+            guarded_walk_with_deadline(Duration::from_millis(20), || {
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(())
+            })
+            .await;
+        let (status, _) = result.unwrap_err();
+        assert_eq!(
+            status,
+            StatusCode::GATEWAY_TIMEOUT,
+            "a request that outlives the deadline should 504"
         );
     }
 
