@@ -37,7 +37,7 @@ struct CacheStatsEntry {
 /// held). `oldest_start_ms` is the UNIX-epoch millisecond timestamp of the
 /// oldest in-flight walk, or 0 if none. A walk whose age exceeds
 /// `DATAFLOW_TIMEOUT_SECS` is "stuck" (its permit will never be returned
-/// because `spawn_blocking` cannot be cancelled).
+/// because the blocking pool task cannot be cancelled).
 #[derive(Debug, Serialize)]
 struct WalkStatsEntry {
     in_flight: u64,

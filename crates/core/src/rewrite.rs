@@ -8,11 +8,11 @@ use anyhow::{Result, bail};
 use ast_grep_core::AstGrep;
 use ast_grep_core::matcher::Pattern;
 use ast_grep_core::tree_sitter::StrDoc;
-use ignore::WalkBuilder;
 
 use crate::grep_filter::build_globset;
 use crate::structural::{LangWrapper, file_matches_lang, lang_wrapper};
 use crate::types::{RewriteFileResult, RewriteInput, RewriteResponse};
+use crate::walk::{DEFAULT_MAX_FILE_BYTES, WalkBudget, filtered_walk};
 
 // ── Per-path write serialization (issue #47) ──────────────────────────────────
 //
@@ -84,26 +84,59 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
     let mut total_skipped = 0usize;
     let mut rejected: Vec<crate::types::RewriteRejection> = Vec::new();
 
-    let walker = WalkBuilder::new(root)
-        .standard_filters(true)
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()));
+    // #52 mutation-path caveat: on `/rewrite apply=true` a SILENTLY-skipped
+    // >20MB file would be left un-rewritten with no signal → an
+    // inconsistent-state footgun. So `max_file_bytes` is `None` here (no
+    // silent pre-read skip by `ignore`'s `max_filesize`); the per-file byte
+    // cap is enforced INSIDE the loop below, where an oversize file is
+    // SURFACED into `rejected` (observable to the caller) rather than
+    // silently dropped. This differs from the read-only endpoints (PR2),
+    // which pass `max_file_bytes: Some(DEFAULT_MAX_FILE_BYTES)` and accept
+    // the silent skip because they mutate nothing.
+    //
+    // `exts=None` because rewrite filters via `file_matches_lang` (which uses
+    // `detect_language` + case-insensitive tsx/jsx matching) — passing a
+    // static extension set would diverge on uppercase extensions, the same
+    // reason `/search/structural` passes `None` (see structural.rs). The
+    // include/exclude GlobSets are applied by `filtered_walk` itself.
+    let budget = WalkBudget {
+        max_files: input.max_files,
+        max_file_bytes: None,
+    };
 
-    for entry in walker {
-        let path = entry.path();
-        if !file_matches_lang(path, &lang_name) {
+    // Bind the walk (don't consume it anonymously) so we can read
+    // `walk.truncated()` after the loop — mirroring the read path
+    // (`analyze_uncached` in crates/server/src/dataflow.rs). Without this,
+    // files beyond `max_files` are silently NOT rewritten with no signal to
+    // the caller (the cap is enforced inside `FilteredWalk::next`, but the
+    // old `for ... in filtered_walk(...)` consumed the iterator inline and
+    // never read `truncated()`).
+    let mut walk = filtered_walk(root, None, include.as_ref(), exclude.as_ref(), budget);
+    // Tracks whether the loop exited via the `max_results` early-break (vs.
+    // natural exhaustion). The early-break can fire at exactly `count == cap`,
+    // where the walk's cap check (which runs on the NEXT pull, not the current
+    // one) never gets a chance to set `truncated` — a real max_files truncation
+    // is silently missed. The post-loop probe below closes that gap, parity
+    // with the read path's `broke_early` handling.
+    let mut broke_early = false;
+    for (path, rel_path, metadata) in walk.by_ref() {
+        if !file_matches_lang(&path, &lang_name) {
             continue;
         }
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include
-            && !inc.is_match(rel)
-        {
-            continue;
-        }
-        if let Some(ref exc) = exclude
-            && exc.is_match(rel)
-        {
+
+        // SURFACE the oversize skip: a file >20MB is NOT silently dropped
+        // (unlike the read endpoints). It is recorded in `rejected` with the
+        // oversize reason and skipped (never read, never mutated), so the
+        // caller sees exactly which files were left un-rewritten.
+        if metadata.len() > DEFAULT_MAX_FILE_BYTES {
+            rejected.push(crate::types::RewriteRejection {
+                file: rel_path,
+                reason: format!(
+                    "skipped: file exceeds {}MB byte cap ({} bytes)",
+                    DEFAULT_MAX_FILE_BYTES / (1024 * 1024),
+                    metadata.len()
+                ),
+            });
             continue;
         }
 
@@ -117,7 +150,7 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         // paths permanently rejected with a sticky DoS). We log the recovery
         // so it's diagnosable rather than silently absorbed.
         let _write_guard = if input.apply {
-            Some(stripe_for(path).lock().unwrap_or_else(|e| {
+            Some(stripe_for(&path).lock().unwrap_or_else(|e| {
                 tracing::warn!(
                     path = %path.display(),
                     "rewrite: stripe write-lock poisoned, recovering (Mutex<()> guards no data)"
@@ -128,12 +161,11 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
             None
         };
 
-        let src = match std::fs::read_to_string(path) {
+        let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        let rel_path = rel.to_string_lossy().into_owned();
         let ast: AstGrep<StrDoc<_>> = AstGrep::new(&src, wrapper.clone());
 
         let mut edits: Vec<(usize, usize, String)> = Vec::new();
@@ -212,7 +244,7 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
             use std::io::Write as _;
             tmp.write_all(modified.as_bytes())
                 .map_err(|e| anyhow::anyhow!("rewrite: write tmp: {e}"))?;
-            tmp.persist(path)
+            tmp.persist(&path)
                 .map_err(|e| anyhow::anyhow!("rewrite: persist {}: {e}", path.display()))?;
         }
 
@@ -237,8 +269,24 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         });
 
         if total_matches >= input.max_results {
+            broke_early = true;
             break;
         }
+    }
+
+    // `walk.truncated()` is the sole source of truth: true iff a qualifying
+    // file existed beyond position cap (checked after pulling, not before).
+    // Mirrors the read path (`analyze_uncached`).
+    let mut files_truncated = walk.truncated();
+    // Early-break edge case: if the `max_results` budget fired at exactly
+    // `count == cap`, the walk's cap check never ran (it fires on the NEXT
+    // pull, which we skipped by breaking). Probe one more pull: if the cap is
+    // hit, `FilteredWalk::next` sets `truncated` internally and returns None;
+    // we re-read `walk.truncated()`. If the walk naturally exhausts, truncated
+    // stays false — no false positive. Parity with the read path's probe.
+    if broke_early && input.max_files.is_some() && !files_truncated {
+        let _ = walk.next();
+        files_truncated = walk.truncated();
     }
 
     let total_files = files.len();
@@ -249,6 +297,7 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         total_files,
         duration_ms: start.elapsed().as_millis() as u64,
         rejected,
+        files_truncated,
     })
 }
 
@@ -346,6 +395,7 @@ mod tests {
             file_glob: None,
             exclude_glob: None,
             apply: false,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = rewrite(input).unwrap();
         assert_eq!(result.total_matches, 1);
@@ -370,6 +420,7 @@ mod tests {
             file_glob: None,
             exclude_glob: None,
             apply: false,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = rewrite(input).unwrap();
         assert_eq!(result.total_matches, 2);
@@ -393,6 +444,7 @@ mod tests {
             file_glob: None,
             exclude_glob: None,
             apply: false,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = rewrite(input).unwrap();
         assert_eq!(result.total_matches, 0);
@@ -436,6 +488,7 @@ mod tests {
             file_glob: None,
             exclude_glob: None,
             apply: true,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = rewrite(input).unwrap();
         assert_eq!(result.total_matches, 1);
@@ -486,6 +539,7 @@ mod tests {
             file_glob: None,
             exclude_glob: None,
             apply: true,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = rewrite(input).unwrap();
         let f = &result.files[0];
@@ -540,6 +594,7 @@ mod tests {
             file_glob: None,
             exclude_glob: None,
             apply: true,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result =
             rewrite(input).expect("batch must not Err on a per-file invariant failure (F2)");
@@ -587,6 +642,7 @@ mod tests {
             file_glob: None,
             exclude_glob: None,
             apply: true,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = rewrite(input);
 
@@ -638,6 +694,7 @@ mod tests {
                 file_glob: None,
                 exclude_glob: None,
                 apply: true,
+                max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
             };
             rewrite(input).unwrap()
         });
@@ -653,6 +710,7 @@ mod tests {
                 file_glob: None,
                 exclude_glob: None,
                 apply: true,
+                max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
             };
             rewrite(input).unwrap()
         });
@@ -705,6 +763,7 @@ mod tests {
             file_glob: None,
             exclude_glob: None,
             apply: true,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = rewrite(input).expect("batch must NOT Err on a per-file rejection (F2)");
 
@@ -757,5 +816,246 @@ mod tests {
             "the widest edit must win the tie-break"
         );
         assert_eq!(skipped, 1, "the narrower edit must be reported as skipped");
+    }
+
+    // ── PR3: filtered_walk adoption + SURFACE-oversize tests ───────────────
+
+    /// Golden / result-identity test: adopting `filtered_walk` + `WalkBudget`
+    /// did NOT change what `/rewrite` returns for a normal dry-run request
+    /// over normal-sized files. The match count, file count, and diff content
+    /// must be exactly what they were before the walk refactor. This is a
+    /// regression guard against future drift (it passes on the pre-refactor
+    /// walk too — that is the point of a golden-identity test).
+    #[test]
+    fn test_rewrite_golden_result_identity() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc foo() error {\n    val, err := doSomething()\n    if err != nil {\n        return err\n    }\n    return nil\n}\n",
+        ).unwrap();
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: false,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
+        };
+        let result = rewrite(input).unwrap();
+        // Golden: exactly 1 match in 1 file, diff contains the wrap edit.
+        assert_eq!(result.total_matches, 1);
+        assert_eq!(result.total_files, 1);
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].diff.contains("fmt.Errorf"));
+        assert!(result.rejected.is_empty());
+    }
+
+    /// #52 mutation-path caveat: on `/rewrite apply=true` a SILENTLY-skipped
+    /// file over 20MB would be left un-rewritten with no signal → an
+    /// inconsistent-state footgun. The byte-cap must SURFACE the skip in
+    /// `RewriteResponse.rejected` (with the oversize reason) and must NOT
+    /// mutate the big file, while normal-sized matching files ARE rewritten.
+    ///
+    /// RED against a silent-skip impl (passing `max_file_bytes: Some(...)` to
+    /// `filtered_walk`): the big file is dropped pre-yield → never reaches the
+    /// loop → not in `rejected` → the `rejected` assertion fails. Also RED
+    /// against the pre-PR3 walk (no byte cap at all): the big file IS read and
+    /// rewritten → the "not mutated" assertion fails.
+    #[test]
+    fn test_rewrite_surfaces_oversize_skip() {
+        let dir = TempDir::new().unwrap();
+        // Normal file with a matchable pattern.
+        let small_path = dir.path().join("small.go");
+        fs::write(
+            &small_path,
+            "package main\nfunc f() {\nif err != nil { return err }\n}\n",
+        )
+        .unwrap();
+        // Big file (>20MB) that WOULD match the pattern, padded with a long
+        // block comment to exceed the byte cap.
+        let big_path = dir.path().join("big.go");
+        let padding = " ".repeat(21 * 1024 * 1024);
+        let big_original = format!(
+            "package main\nfunc big() {{\nif err != nil {{ return err }}\n}}\n/* {padding} */\n"
+        );
+        fs::write(&big_path, &big_original).unwrap();
+
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: true,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
+        };
+        let result = rewrite(input).expect("batch must not Err on an oversize skip");
+
+        // The small file was rewritten (persisted).
+        let small_content = fs::read_to_string(&small_path).unwrap();
+        assert!(
+            small_content.contains("fmt.Errorf"),
+            "small file must be rewritten; got: {small_content}"
+        );
+
+        // The big file was NOT mutated (left untouched — oversize skip).
+        let big_content = fs::read_to_string(&big_path).unwrap();
+        assert_eq!(
+            big_content, big_original,
+            "oversize big file must NOT be mutated; got: {big_content}"
+        );
+
+        // The big file must be SURFACED in `rejected` with an oversize reason.
+        let oversize_rejections: Vec<_> = result
+            .rejected
+            .iter()
+            .filter(|r| r.file.contains("big.go"))
+            .collect();
+        assert_eq!(
+            oversize_rejections.len(),
+            1,
+            "the oversize big file must appear exactly once in rejected; got {:?}",
+            result.rejected
+        );
+        let reason = &oversize_rejections[0].reason;
+        assert!(
+            reason.contains("20MB") || reason.contains("byte cap"),
+            "rejection reason must mention the byte cap; got: {reason}"
+        );
+
+        // The small file must NOT appear in rejected (it was persisted).
+        assert!(
+            !result.rejected.iter().any(|r| r.file.contains("small.go")),
+            "small file must not be rejected; got {:?}",
+            result.rejected
+        );
+        // And the small file's rewrite must be counted in files[].
+        assert_eq!(
+            result.files.len(),
+            1,
+            "only the small file must be in files"
+        );
+        assert!(result.files[0].file.contains("small.go"));
+    }
+
+    /// F1 — silent file-COUNT truncation on the mutation path: when more
+    /// matching files exist than `max_files`, the walk caps at `max_files` and
+    /// files beyond the cap are NOT rewritten. `files_truncated` must surface
+    /// this (mirroring `DataflowResponse.files_truncated` on the read path),
+    /// and the returned rewrites must be exactly the first `max_files` files in
+    /// walk (sorted-path) order. REDS if the walk is consumed anonymously
+    /// without reading `walk.truncated()` (files_truncated stays false) or if
+    /// the `files_truncated` field is missing from `RewriteResponse`.
+    #[test]
+    fn test_rewrite_files_truncated_true_when_cap_exceeded() {
+        let dir = TempDir::new().unwrap();
+        // 5 matching .go files, cap at 3 → walk yields the first 3 in sorted
+        // path order (f00, f01, f02); f03/f04 are beyond cap (not rewritten).
+        for i in 0..5u8 {
+            let name = format!("f{i:02}.go");
+            fs::write(
+                dir.path().join(&name),
+                "package main\nfunc f() {\nif err != nil { return err }\n}\n",
+            )
+            .unwrap();
+        }
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: true,
+            max_files: Some(3),
+        };
+        let result = rewrite(input).unwrap();
+
+        // files_truncated must be true — 2 qualifying files were beyond cap.
+        assert!(
+            result.files_truncated,
+            "files_truncated must be true when more matching files exist than max_files"
+        );
+        // Exactly the first 3 files (in sorted path order) were rewritten.
+        assert_eq!(
+            result.files.len(),
+            3,
+            "only the first max_files (3) files must be in files; got {:?}",
+            result.files.iter().map(|f| &f.file).collect::<Vec<_>>()
+        );
+        let rewritten: Vec<&str> = result.files.iter().map(|f| f.file.as_str()).collect();
+        assert!(
+            rewritten
+                .iter()
+                .all(|f| f.contains("f00.go") || f.contains("f01.go") || f.contains("f02.go")),
+            "the first 3 sorted-path files must be rewritten; got {rewritten:?}"
+        );
+        // The beyond-cap files were NOT rewritten.
+        for i in 3..5u8 {
+            let name = format!("f{i:02}.go");
+            let content = fs::read_to_string(dir.path().join(&name)).unwrap();
+            assert!(
+                !content.contains("fmt.Errorf"),
+                "beyond-cap file {name} must NOT be rewritten; got: {content}"
+            );
+        }
+    }
+
+    /// F1 — exact-cap boundary: a fixture with EXACTLY `max_files` matching
+    /// files must report `files_truncated == false` (the walk naturally
+    /// exhausted at exactly the cap — no qualifying file was skipped). Mirrors
+    /// the read path's `test_analyze_directory_exact_cap_boundary`. REDS if
+    /// the cap check fires at the top of `FilteredWalk::next` (before pulling)
+    /// instead of after, or if `files_truncated` is wrongly set at count==cap.
+    #[test]
+    fn test_rewrite_files_truncated_false_at_exact_cap() {
+        let dir = TempDir::new().unwrap();
+        // Exactly 3 matching .go files, cap is also 3.
+        for i in 0..3u8 {
+            let name = format!("f{i:02}.go");
+            fs::write(
+                dir.path().join(&name),
+                "package main\nfunc f() {\nif err != nil { return err }\n}\n",
+            )
+            .unwrap();
+        }
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: false,
+            max_files: Some(3),
+        };
+        let result = rewrite(input).unwrap();
+        assert_eq!(
+            result.files.len(),
+            3,
+            "all 3 files should be rewritten (dry-run)"
+        );
+        assert!(
+            !result.files_truncated,
+            "files_truncated must be false when the walk naturally exhausted at exactly the cap \
+             (no qualifying file was skipped)"
+        );
+    }
+
+    /// Serde default: an absent `max_files` field deserializes to
+    /// `Some(DEFAULT_FILE_COUNT_CAP)` (2000), not `None`.
+    #[test]
+    fn test_rewrite_max_files_default_is_2000() {
+        let json = r#"{"root":"/tmp","pattern":"foo($$$A)","rewrite":"bar($$$A)","language":"javascript","apply":false}"#;
+        let input: RewriteInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.max_files, Some(crate::walk::DEFAULT_FILE_COUNT_CAP));
+        assert_eq!(input.max_files, Some(2000));
     }
 }
