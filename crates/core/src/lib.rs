@@ -6,6 +6,7 @@ pub mod scope_cache;
 pub mod scoped;
 pub mod structural;
 pub mod types;
+pub mod weighted_cache;
 
 pub use scope_cache::ScopeCache;
 pub use types::*;
