@@ -6,6 +6,7 @@ use tree_sitter::Node;
 
 use crate::il::*;
 use crate::il_builder::IlBuilder;
+use crate::types::Span;
 
 impl<'a> IlBuilder<'a> {
     pub(crate) fn visit_short_var_decl(&mut self, node: Node) {
@@ -32,6 +33,20 @@ impl<'a> IlBuilder<'a> {
     /// `variable_declaration`).  Each `variable_declarator` child has `name`
     /// and optional `value` fields; the value (if present) is built as an
     /// expression and the result is pushed as an `Instr::Assign`.
+    ///
+    /// Destructuring declarators (`object_pattern` `const {a}=…` /
+    /// `array_pattern` `const [a]=…`) are recursed: every LEAF identifier is
+    /// bound to its own sid sourced from the SAME rval (#59). This
+    /// over-approximates by design — every extracted binding inherits the full
+    /// RHS taint (safe direction: no false negative; a false positive when
+    /// only one property of the RHS is tainted is acceptable). The HARD LESSON
+    /// from #55: NEVER use a pattern / non-identifier node's raw text as a
+    /// binding name (a prior attempt coined a variable literally named
+    /// "{token}" and poisoned the name table) — recurse DOWN to leaf
+    /// `identifier` / `shorthand_property_identifier_pattern` nodes and bind
+    /// ONLY those. Any pattern child kind not recognized here is CLEANLY
+    /// SKIPPED (fail-safe: degrades to a false-negative skip, never a decoy
+    /// binding or a panic).
     pub(crate) fn visit_var_decl(&mut self, node: Node) {
         let count = node.named_child_count();
         for i in 0..count {
@@ -45,29 +60,100 @@ impl<'a> IlBuilder<'a> {
             let Some(name_node) = name_node else {
                 continue;
             };
-            // Only bind a plain identifier name. A destructuring declarator
-            // (object_pattern `const {a,b}=…` / array_pattern `const [a]=…`)
-            // is NOT an identifier: node_text would coin a bogus variable like
-            // "{ a, b }" that no reference matches, silently dropping the taint
-            // flow (re-review #55). Skipping restores the pre-fix behavior for
-            // destructuring (unhandled, not mis-handled); full destructuring
-            // taint is a separate follow-up.
-            if name_node.kind() != "identifier" {
-                continue;
-            }
-            let ident = self.node_text(name_node).to_string();
-            let sid = self.next_sid();
-            self.name_table.insert(ident.clone(), sid);
-            let lval = Lval::var(Name::new(ident, sid));
             let rval = declarator
                 .child_by_field_name("value")
                 .map(|n| self.build_expr(n))
                 .unwrap_or(Expr::Const(Const::Nil));
-            self.current_body.push(Instr::Assign {
-                lval,
-                rval,
-                span: self.span_of(node),
-            });
+            let span = self.span_of(node);
+            // Branch on the declarator name shape. A plain identifier takes the
+            // fast path; object/array patterns recurse to their leaf bindings.
+            // Anything else is a clean skip (fail-safe).
+            match name_node.kind() {
+                "identifier" => self.bind_pattern_leaf(name_node, &rval, span),
+                "object_pattern" | "array_pattern" => {
+                    self.bind_pattern_leaves(name_node, &rval, span);
+                }
+                _ => {
+                    // Unhandled declarator-name shape: skip cleanly (no decoy
+                    // binding, no panic). Same fail-safe property the #55 guard
+                    // gave, now reached per-declarator.
+                }
+            }
+        }
+    }
+
+    /// Bind a single LEAF identifier pattern node to a fresh sid sourced from
+    /// `rval` and push the `Instr::Assign`. `identifier` and
+    /// `shorthand_property_identifier_pattern` are the only leaf kinds — both
+    /// have node text that IS the binding name (e.g. `token` for `{token}`).
+    fn bind_pattern_leaf(&mut self, leaf: Node, rval: &Expr, span: Span) {
+        let ident = self.node_text(leaf).to_string();
+        let sid = self.next_sid();
+        self.name_table.insert(ident.clone(), sid);
+        let lval = Lval::var(Name::new(ident, sid));
+        self.current_body.push(Instr::Assign {
+            lval,
+            rval: rval.clone(),
+            span,
+        });
+    }
+
+    /// Recurse a destructuring pattern (`object_pattern` / `array_pattern` and
+    /// their nested children), binding each leaf identifier to a fresh sid
+    /// sourced from the SAME `rval`. Over-approximates: every extracted
+    /// binding inherits the full RHS taint. Unrecognized child kinds are
+    /// cleanly skipped (fail-safe).
+    fn bind_pattern_leaves(&mut self, pattern: Node, rval: &Expr, span: Span) {
+        match pattern.kind() {
+            // Leaves: bind directly.
+            "identifier" | "shorthand_property_identifier_pattern" => {
+                self.bind_pattern_leaf(pattern, rval, span);
+            }
+            // Container patterns: recurse each named child.
+            "object_pattern" | "array_pattern" => {
+                let n = pattern.named_child_count() as u32;
+                for i in 0..n {
+                    if let Some(child) = pattern.named_child(i) {
+                        self.bind_pattern_leaves(child, rval, span);
+                    }
+                }
+            }
+            // `{token: t}` — bind the VALUE side only; the property key
+            // (`property_identifier`) is NOT a binding.
+            "pair_pattern" => {
+                let value = pattern.child_by_field_name("value").or_else(|| {
+                    // Fallback: the named child that is not the key.
+                    let n = pattern.named_child_count() as u32;
+                    (0..n).find_map(|i| {
+                        let c = pattern.named_child(i)?;
+                        (c.kind() != "property_identifier").then_some(c)
+                    })
+                });
+                if let Some(value) = value {
+                    self.bind_pattern_leaves(value, rval, span);
+                }
+            }
+            // `{...rest}` / `[...rest]` — bind the inner identifier.
+            "rest_pattern" => {
+                if let Some(inner) = pattern.named_child(0) {
+                    self.bind_pattern_leaves(inner, rval, span);
+                }
+            }
+            // `{token = 1}` (object_assignment_pattern) and `[a = 1]` /
+            // `{a: b = 1}` (assignment_pattern): bind the LEFT (the identifier
+            // being defaulted); the default value (right) is NOT a binding.
+            "object_assignment_pattern" | "assignment_pattern" => {
+                let left = pattern
+                    .child_by_field_name("left")
+                    .or_else(|| pattern.named_child(0));
+                if let Some(left) = left {
+                    self.bind_pattern_leaves(left, rval, span);
+                }
+            }
+            // Unrecognized pattern child: clean skip (fail-safe — no decoy
+            // binding, no panic). A future unhandled shape degrades to a
+            // false-negative skip, never a decoy.
+            _ => {}
         }
     }
 
