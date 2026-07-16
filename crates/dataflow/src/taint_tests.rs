@@ -276,16 +276,15 @@ fn taint_tsx_sink_not_dropped() {
     assert_eq!(findings[0].sink.function, "sink");
 }
 
-/// Re-review (#55): a destructuring declaration (`const {token} = getSource()`)
-/// must be handled FAIL-SAFE. `visit_var_decl` skips a non-identifier
-/// declarator `name` (object_pattern / array_pattern) rather than coining a
-/// decoy variable literally named "{token}" that poisons the name table. The
-/// consequence is that destructuring taint is not (yet) tracked — a
-/// pre-existing false negative, tracked as a follow-up — but the skip must be
-/// CLEAN: no decoy binding, no panic, and no spurious finding. This test locks
-/// that: a finding here would mean the decoy leaked (a false positive).
+/// #59: object destructuring shorthand `const {token} = getSource()` must
+/// track taint through to `sink(token)`. Previously `visit_var_decl` skipped
+/// any non-identifier declarator name (object_pattern / array_pattern) as a
+/// fail-safe, making this a silent false negative — the single most common
+/// taint-source idiom in Express/Next TS. Now each leaf identifier is bound to
+/// its own sid sourced from the same rval (over-approximation: every extracted
+/// binding inherits the full RHS taint).
 #[test]
-fn taint_destructuring_declarator_fail_safe() {
+fn taint_destructuring_object_shorthand() {
     use crate::taint::{TaintSink, TaintSource};
     use crate::taint_rules::TaintRule;
 
@@ -317,8 +316,298 @@ fn taint_destructuring_declarator_fail_safe() {
         findings.extend(analyze_taint(&cfg, &rules, "app.ts"));
     }
     assert!(
+        !findings.is_empty(),
+        "const {{token}} = getSource(); sink(token) must report the taint flow; \
+         IL had {} functions / {} total instrs",
+        il.functions.len(),
+        il.functions.iter().map(|f| f.body.len()).sum::<usize>()
+    );
+    assert_eq!(findings[0].rule_id, "xss");
+    assert_eq!(findings[0].sink.function, "sink");
+}
+
+/// #59: array destructuring `const [a] = taintedArr; sink(a)`.
+#[test]
+fn taint_destructuring_array_element() {
+    use crate::taint::{TaintSink, TaintSource};
+    use crate::taint_rules::TaintRule;
+
+    let src = br#"function App() {
+    const [a] = getSource();
+    sink(a);
+}
+"#;
+    let rules = vec![TaintRule {
+        id: "xss".into(),
+        sources: vec![TaintSource {
+            pattern: "getSource".into(),
+            tag: "user_input".into(),
+        }],
+        sinks: vec![TaintSink {
+            pattern: "sink".into(),
+            arg_index: 0,
+            cwe: "CWE-79".into(),
+            description: "XSS".into(),
+        }],
+        sanitizers: vec![],
+        severity: "error".into(),
+    }];
+
+    let il = build_il(src, "typescript").unwrap();
+    let mut findings = Vec::new();
+    for func in &il.functions {
+        let cfg = build_cfg(func);
+        findings.extend(analyze_taint(&cfg, &rules, "app.ts"));
+    }
+    assert!(
+        !findings.is_empty(),
+        "const [a] = getSource(); sink(a) must report the taint flow"
+    );
+}
+
+/// #59: renamed pair `const {token: t} = getSource(); sink(t)` — the value
+/// side of a `pair_pattern` is the binding (`t`), not the property key.
+#[test]
+fn taint_destructuring_rename_pair() {
+    use crate::taint::{TaintSink, TaintSource};
+    use crate::taint_rules::TaintRule;
+
+    let src = br#"function App() {
+    const {token: t} = getSource();
+    sink(t);
+}
+"#;
+    let rules = vec![TaintRule {
+        id: "xss".into(),
+        sources: vec![TaintSource {
+            pattern: "getSource".into(),
+            tag: "user_input".into(),
+        }],
+        sinks: vec![TaintSink {
+            pattern: "sink".into(),
+            arg_index: 0,
+            cwe: "CWE-79".into(),
+            description: "XSS".into(),
+        }],
+        sanitizers: vec![],
+        severity: "error".into(),
+    }];
+
+    let il = build_il(src, "typescript").unwrap();
+    let mut findings = Vec::new();
+    for func in &il.functions {
+        let cfg = build_cfg(func);
+        findings.extend(analyze_taint(&cfg, &rules, "app.ts"));
+    }
+    assert!(
+        !findings.is_empty(),
+        "const {{token: t}} = getSource(); sink(t) must report the taint flow \
+         (the pair value `t` is the binding, not the key `token`)"
+    );
+}
+
+/// #59: rest pattern `const {...rest} = getSource(); sink(rest)`.
+#[test]
+fn taint_destructuring_rest() {
+    use crate::taint::{TaintSink, TaintSource};
+    use crate::taint_rules::TaintRule;
+
+    let src = br#"function App() {
+    const {...rest} = getSource();
+    sink(rest);
+}
+"#;
+    let rules = vec![TaintRule {
+        id: "xss".into(),
+        sources: vec![TaintSource {
+            pattern: "getSource".into(),
+            tag: "user_input".into(),
+        }],
+        sinks: vec![TaintSink {
+            pattern: "sink".into(),
+            arg_index: 0,
+            cwe: "CWE-79".into(),
+            description: "XSS".into(),
+        }],
+        sanitizers: vec![],
+        severity: "error".into(),
+    }];
+
+    let il = build_il(src, "typescript").unwrap();
+    let mut findings = Vec::new();
+    for func in &il.functions {
+        let cfg = build_cfg(func);
+        findings.extend(analyze_taint(&cfg, &rules, "app.ts"));
+    }
+    assert!(
+        !findings.is_empty(),
+        "const {{...rest}} = getSource(); sink(rest) must report the taint flow"
+    );
+}
+
+/// #59: nested object destructuring `const {a: {b}} = getSource(); sink(b)`.
+#[test]
+fn taint_destructuring_nested() {
+    use crate::taint::{TaintSink, TaintSource};
+    use crate::taint_rules::TaintRule;
+
+    let src = br#"function App() {
+    const {a: {b}} = getSource();
+    sink(b);
+}
+"#;
+    let rules = vec![TaintRule {
+        id: "xss".into(),
+        sources: vec![TaintSource {
+            pattern: "getSource".into(),
+            tag: "user_input".into(),
+        }],
+        sinks: vec![TaintSink {
+            pattern: "sink".into(),
+            arg_index: 0,
+            cwe: "CWE-79".into(),
+            description: "XSS".into(),
+        }],
+        sanitizers: vec![],
+        severity: "error".into(),
+    }];
+
+    let il = build_il(src, "typescript").unwrap();
+    let mut findings = Vec::new();
+    for func in &il.functions {
+        let cfg = build_cfg(func);
+        findings.extend(analyze_taint(&cfg, &rules, "app.ts"));
+    }
+    assert!(
+        !findings.is_empty(),
+        "const {{a: {{b}}}} = getSource(); sink(b) must report the taint flow \
+         (recursion reaches the nested leaf `b`)"
+    );
+}
+
+/// #59: default value `const {token = 1} = getSource(); sink(token)` — the
+/// `object_assignment_pattern` binds its left (the shorthand `token`); the
+/// default `1` is not a binding.
+#[test]
+fn taint_destructuring_default() {
+    use crate::taint::{TaintSink, TaintSource};
+    use crate::taint_rules::TaintRule;
+
+    let src = br#"function App() {
+    const {token = 1} = getSource();
+    sink(token);
+}
+"#;
+    let rules = vec![TaintRule {
+        id: "xss".into(),
+        sources: vec![TaintSource {
+            pattern: "getSource".into(),
+            tag: "user_input".into(),
+        }],
+        sinks: vec![TaintSink {
+            pattern: "sink".into(),
+            arg_index: 0,
+            cwe: "CWE-79".into(),
+            description: "XSS".into(),
+        }],
+        sanitizers: vec![],
+        severity: "error".into(),
+    }];
+
+    let il = build_il(src, "typescript").unwrap();
+    let mut findings = Vec::new();
+    for func in &il.functions {
+        let cfg = build_cfg(func);
+        findings.extend(analyze_taint(&cfg, &rules, "app.ts"));
+    }
+    assert!(
+        !findings.is_empty(),
+        "const {{token = 1}} = getSource(); sink(token) must report the taint flow \
+         (object_assignment_pattern binds the left shorthand `token`)"
+    );
+}
+
+/// #59 fail-safe preservation: the HARD LESSON from #55 is that a pattern /
+/// non-identifier node's RAW TEXT must NEVER be used as a binding name (a
+/// prior attempt coined a variable literally named "{token}" and poisoned the
+/// name table). Now that `visit_var_decl` recurses patterns, the per-leaf
+/// recursion must still bind ONLY leaf identifiers — never a raw pattern
+/// fragment. This test builds IL for a mixed destructuring over a CLEAN rhs
+/// (no source → no finding expected) and asserts NO lval ident in the IL
+/// contains pattern punctuation (`{`, `}`, `[`, `]`, `...`, `:`), which would
+/// indicate a decoy binding leaked from a non-identifier node's text. It also
+/// confirms a TS type annotation on the declarator (`: {a: string}`) — a
+/// sibling of the pattern, not a pattern child — does not poison bindings.
+#[test]
+fn taint_destructuring_no_decoy_binding_fail_safe() {
+    use crate::il::{Base, Instr};
+    use crate::taint::{TaintSink, TaintSource};
+    use crate::taint_rules::TaintRule;
+
+    // Clean rhs (no source) → no taint finding expected. The point of this
+    // test is the decoy-binding invariant on the IL, not the taint result.
+    let src = br#"function App() {
+    const {a: b}: {a: string} = clean();
+    const [{c}, d] = clean();
+    const {...rest} = clean();
+    sink(b);
+    sink(c);
+    sink(d);
+    sink(rest);
+}
+"#;
+    let rules = vec![TaintRule {
+        id: "xss".into(),
+        sources: vec![TaintSource {
+            pattern: "getSource".into(),
+            tag: "user_input".into(),
+        }],
+        sinks: vec![TaintSink {
+            pattern: "sink".into(),
+            arg_index: 0,
+            cwe: "CWE-79".into(),
+            description: "XSS".into(),
+        }],
+        sanitizers: vec![],
+        severity: "error".into(),
+    }];
+
+    let il = build_il(src, "typescript").unwrap();
+
+    // (1) No decoy binding: no lval ident carries pattern punctuation.
+    let mut decoys: Vec<String> = Vec::new();
+    for func in &il.functions {
+        for instr in &func.body {
+            if let Instr::Assign { lval, .. } = instr
+                && let Base::Var(name) = &lval.base
+            {
+                let ident = &name.ident;
+                if ident.contains('{')
+                    || ident.contains('}')
+                    || ident.contains('[')
+                    || ident.contains(']')
+                    || ident.contains("...")
+                    || ident.contains(':')
+                {
+                    decoys.push(ident.clone());
+                }
+            }
+        }
+    }
+    assert!(
+        decoys.is_empty(),
+        "decoy binding leaked (raw pattern text used as a variable name): {decoys:?}"
+    );
+
+    // (2) No panic, no spurious finding (clean rhs, no source).
+    let mut findings = Vec::new();
+    for func in &il.functions {
+        let cfg = build_cfg(func);
+        findings.extend(analyze_taint(&cfg, &rules, "app.ts"));
+    }
+    assert!(
         findings.is_empty(),
-        "destructuring taint is not tracked yet (fail-safe skip); a finding here \
-         would mean a decoy binding leaked: {findings:?}"
+        "clean rhs destructuring must produce no finding; a finding would mean \
+         a decoy binding collided with a sink arg: {findings:?}"
     );
 }
