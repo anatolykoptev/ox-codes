@@ -7,12 +7,11 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use ast_grep_core::AstGrep;
 use ast_grep_core::matcher::Pattern;
-use ast_grep_core::tree_sitter::{LanguageExt, StrDoc};
+use ast_grep_core::tree_sitter::StrDoc;
 use ignore::WalkBuilder;
-use tree_sitter::{Language, Parser};
 
 use crate::grep_filter::build_globset;
-use crate::structural::{file_matches_lang, lang_wrapper};
+use crate::structural::{LangWrapper, file_matches_lang, lang_wrapper};
 use crate::types::{RewriteFileResult, RewriteInput, RewriteResponse};
 
 // ── Per-path write serialization (issue #47) ──────────────────────────────────
@@ -166,19 +165,29 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
 
         if input.apply {
             // Post-write invariant (#41/#53): re-parse the modified buffer with
-            // the SAME grammar used for matching. If it fails to parse at all
-            // or introduces NEW ERROR/MISSING nodes (F1: detected via the
-            // is_error()/is_missing() flags, NOT kind() string compares) that
-            // were not in the original tree, do NOT persist that file.
+            // the SAME grammar used for matching. If it introduces NEW
+            // ERROR/MISSING nodes (F1: detected via the is_error()/is_missing()
+            // flags, NOT kind() string compares) that were not in the original
+            // tree, do NOT persist that file.
             //
             // F2 (#53): do NOT bail the whole batch — earlier files in walk
             // order are already persisted, and the server maps any Err→400,
             // discarding the result so the caller can't tell which files were
             // already mutated. Instead record the file as REJECTED, leave it
             // untouched, and CONTINUE the walk so valid files still land.
-            let ts_lang = wrapper.get_ts_language();
-            let orig_errors = count_errors(&src, &ts_lang).unwrap_or(usize::MAX);
-            let new_errors = count_errors(&modified, &ts_lang).unwrap_or(usize::MAX);
+            //
+            // #54: reuse the ALREADY-BUILT `ast` (parsed once above) for the
+            // original error count — zero extra parse. The modified buffer gets
+            // ONE fresh `AstGrep::new` with the same wrapper/grammar.
+            // ast_grep_core's `AstGrep::new` always yields a tree (ERROR nodes,
+            // never a None), so the old raw-tree_sitter `None → usize::MAX`
+            // "both failed to parse → non-parsing modified persisted" failure
+            // mode disappears naturally. The invariant still rejects any
+            // modified buffer that introduces new ERROR/MISSING nodes
+            // (new_errors > orig_errors → reject).
+            let orig_errors = count_errors(&ast);
+            let modified_ast: AstGrep<StrDoc<_>> = AstGrep::new(&modified, wrapper.clone());
+            let new_errors = count_errors(&modified_ast);
             if new_errors > orig_errors {
                 rejected.push(crate::types::RewriteRejection {
                     file: rel_path.clone(),
@@ -287,33 +296,23 @@ fn resolve_overlaps(
     (accepted, skipped)
 }
 
-/// Parse `src` with `lang` and count `ERROR`/`MISSING` nodes in the tree.
-/// Returns `None` if the buffer fails to parse at all (treated as maximally
-/// erroneous by the caller's invariant check).
-fn count_errors(src: &str, lang: &Language) -> Option<usize> {
-    let mut parser = Parser::new();
-    parser.set_language(lang).ok()?;
-    let tree = parser.parse(src.as_bytes(), None)?;
-    Some(count_errors_in(tree.root_node()))
-}
-
-fn count_errors_in(node: tree_sitter::Node) -> usize {
-    let mut n = 0;
-    // F1 (#53): use the `is_error()`/`is_missing()` flags, NOT kind() string
-    // compares. A MISSING (zero-width, auto-inserted) node's `kind()` is the
-    // EXPECTED grammar symbol (e.g. `")"`, `"}"`), never the literal
-    // `"MISSING"` — so `kind() == "MISSING"` never fired and a rewrite that
-    // drops a required closing/terminator token (recovered via a pure MISSING
-    // insertion with NO ERROR node) silently passed the invariant.
-    if node.is_error() || node.is_missing() {
-        n += 1;
-    }
-    let mut i = 0;
-    while let Some(child) = node.child(i) {
-        n += count_errors_in(child);
-        i += 1;
-    }
-    n
+/// Count `ERROR`/`MISSING` nodes in an already-parsed ast-grep tree via a
+/// pre-order `dfs()` walk — reusing the `ast_grep_core` machinery instead of
+/// a hand-rolled raw `tree_sitter::{Parser}` re-parse + recursive `child(i)`
+/// walk (issue #54).
+///
+/// Equivalence with the old raw tree-sitter count: `dfs()` (ast_grep_core's
+/// `TsPre`) visits every node via `goto_first_child` — the same node set the
+/// old `node.child(i)` recursion did, including anonymous/ERROR/MISSING nodes.
+/// `is_error()`/`is_missing()` on `ast_grep_core::Node` forward directly to
+/// `tree_sitter::Node::is_error()`/`is_missing()` (the F1 #53 flags, NOT
+/// `kind()` string compares), so the per-node predicate is identical and the
+/// count on identical input is equivalent.
+fn count_errors(ast: &AstGrep<StrDoc<LangWrapper>>) -> usize {
+    ast.root()
+        .dfs()
+        .filter(|n| n.is_error() || n.is_missing())
+        .count()
 }
 
 fn unified_diff(file_path: &str, original: &str, modified: &str) -> String {
@@ -448,21 +447,18 @@ mod tests {
         );
     }
 
-    /// Re-parse `src` with the tree-sitter grammar for `lang_name` and return
-    /// the number of ERROR/MISSING nodes in the tree. Used to assert the
-    /// persisted buffer is not silently corrupted into invalid syntax.
-    ///
-    /// F7 (#53): delegates to the production `count_errors_in` (via the
-    /// `count_errors` helper) instead of re-implementing the tree walk — the
-    /// only part that legitimately differs is the lang-resolution/parse
-    /// boilerplate (tests resolve via `ox_langs::get_language`, production via
-    /// the ast-grep `LangWrapper`).
+    /// Re-parse `src` with the ast-grep grammar for `lang_name` and return the
+    /// number of ERROR/MISSING nodes in the tree. Used to assert the persisted
+    /// buffer is not silently corrupted into invalid syntax. Now uses the SAME
+    /// `lang_wrapper` + `count_errors` path as production (issue #54), so the
+    /// test's error count is computed identically to the invariant's.
     fn count_error_nodes(src: &str, lang_name: &str) -> usize {
-        let cfg = match ox_langs::get_language(lang_name) {
-            Some(c) => c,
+        let wrapper = match lang_wrapper(lang_name) {
+            Some(w) => w,
             None => return 0,
         };
-        count_errors(src, &cfg.language).unwrap_or(usize::MAX)
+        let ast: AstGrep<StrDoc<_>> = AstGrep::new(src, wrapper);
+        count_errors(&ast)
     }
 
     /// Bug A (#41): nested/overlapping ast-grep matches must not silently
