@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -88,38 +87,27 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
     // Rank by match density (stable sort, most matches first).
     per_file.sort_by_key(|a| std::cmp::Reverse(a.1.len()));
 
-    // #46: Select the top `max_results` raw matches in flattened density order
-    // and record which (file_idx, match_idx) pairs survive. Only the files
-    // containing survivors will be read + parsed in the expand pass — NOT the
-    // whole `per_file`. This shrinks the expand work from O(matching-files) to
-    // O(≤max_results survivor files).
+    // #46 + backfill: Iterate the density-sorted files in order, expanding
+    // each file AT MOST ONCE, and COLLECT matches that fit the `max_tokens`
+    // budget. STOP as soon as `max_results` fitting matches are collected OR
+    // the file pool is exhausted. This preserves the "up to `max_results`
+    // FITTING matches, in density order" contract:
+    //
+    // - `max_tokens=None` (default): every match fits → collects exactly the
+    //   first `max_results` matches in density order → expands exactly the
+    //   files holding those matches (≤max_results files). Byte-identical to
+    //   the pre-backfill #46 behavior.
+    // - `max_tokens=Some` with over-budget top matches: keeps walking the
+    //   density-sorted pool and expanding the next densest files until
+    //   `max_results` fitting matches are found → expands
+    //   `max_results + (dropped count)` files, i.e. O(files-needed), NOT
+    //   O(all-files). Worst case (almost nothing fits) degrades toward the
+    //   old expand-all, which is no worse than pre-PR.
     let max_results = input.max_results;
-    let mut survivors: Vec<(usize, usize)> = Vec::with_capacity(max_results);
-    'outer: for (fi, (_, matches)) in per_file.iter().enumerate() {
-        for mi in 0..matches.len() {
-            survivors.push((fi, mi));
-            if survivors.len() >= max_results {
-                break 'outer;
-            }
-        }
-    }
-
-    // Group survivors by file so each surviving file is read + parsed once.
-    let mut file_to_match_indices: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for &(fi, mi) in &survivors {
-        file_to_match_indices.entry(fi).or_default().push(mi);
-    }
-
-    // Expand only the surviving files. The max_tokens skip stays inside
-    // expansion (a survivor dropped by max_tokens is simply absent from the
-    // final list — no backfill from lower-ranked files, which would require
-    // expanding more files and defeat the #46 work-shrink).
     let do_expand = !matches!(input.expand, ExpandMode::None);
-    let mut expanded_map: BTreeMap<(usize, usize), ExpandedMatch> = BTreeMap::new();
+    let mut matches: Vec<ExpandedMatch> = Vec::with_capacity(max_results);
 
-    for (fi, match_indices) in &file_to_match_indices {
-        let (rel_path, raw_matches) = &per_file[*fi];
-
+    'collect: for (rel_path, raw_matches) in per_file.iter() {
         #[cfg(test)]
         EXPAND_FILE_COUNT.with(|c| c.set(c.get() + 1));
 
@@ -129,8 +117,7 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
                 && let Some(lang_name) = ox_langs::detect_language(rel_path)
                 && let Some(lang_cfg) = ox_langs::get_language(lang_name)
             {
-                for &mi in match_indices {
-                    let m = &raw_matches[mi];
+                for m in raw_matches {
                     let byte_offset = line_to_byte_offset(&source, m.line);
                     let expanded = crate::expand::find_enclosing_symbol(
                         &source,
@@ -138,7 +125,8 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
                         byte_offset,
                         &input.expand,
                     );
-                    // Skip match if expanded body exceeds max_tokens
+                    // Skip match if expanded body exceeds max_tokens — but
+                    // keep walking the pool (backfill from lower-ranked files).
                     if let (Some(max_tok), Some(blk)) = (input.max_tokens, &expanded)
                         && blk.body.len() > max_tok
                     {
@@ -152,44 +140,42 @@ pub fn search(input: SearchInput) -> Result<ExpandedSearchResponse> {
                         ),
                         ..blk
                     });
-                    expanded_map.insert(
-                        (*fi, mi),
-                        ExpandedMatch {
-                            file: m.file.clone(),
-                            line: m.line,
-                            text: m.text.clone(),
-                            context: m.context.clone(),
-                            expanded,
-                        },
-                    );
+                    matches.push(ExpandedMatch {
+                        file: m.file.clone(),
+                        line: m.line,
+                        text: m.text.clone(),
+                        context: m.context.clone(),
+                        expanded,
+                    });
+                    if matches.len() >= max_results {
+                        break 'collect;
+                    }
                 }
                 continue;
             }
         }
 
-        // No expansion or language not detected — wrap as-is
-        for &mi in match_indices {
-            let m = &raw_matches[mi];
-            expanded_map.insert(
-                (*fi, mi),
-                ExpandedMatch {
-                    file: m.file.clone(),
-                    line: m.line,
-                    text: m.text.clone(),
-                    context: m.context.clone(),
-                    expanded: None,
-                },
-            );
+        // No expansion or language not detected — wrap as-is (no max_tokens
+        // check: there is no expanded body to budget).
+        for m in raw_matches {
+            matches.push(ExpandedMatch {
+                file: m.file.clone(),
+                line: m.line,
+                text: m.text.clone(),
+                context: m.context.clone(),
+                expanded: None,
+            });
+            if matches.len() >= max_results {
+                break 'collect;
+            }
         }
     }
 
-    // Re-flatten survivors in density order, skipping max_tokens-dropped ones.
-    let matches: Vec<ExpandedMatch> = survivors
-        .into_iter()
-        .filter_map(|key| expanded_map.get(&key).cloned())
-        .collect();
-
-    let truncated = total_matches > max_results;
+    // truncated = total matches FOUND > matches RETURNED. Truthful under
+    // backfill: if max_tokens dropped some matches, total_matches still
+    // reflects the raw count, and truncated correctly signals that fewer
+    // matches were returned than found.
+    let truncated = total_matches > matches.len();
 
     Ok(ExpandedSearchResponse {
         matches,
@@ -537,6 +523,123 @@ mod tests {
         assert!(
             expanded_files >= 1,
             "at least one survivor file must be expanded"
+        );
+    }
+
+    /// F1 backfill test: when the densest matches have oversized enclosing
+    /// blocks (exceed a small `max_tokens`) but lower-density matches fit,
+    /// the search must BACKFILL from the lower-ranked files until
+    /// `max_results` fitting matches are collected — NOT return 0 (which the
+    /// no-backfill code produced: it pre-selected exactly `max_results`
+    /// survivors from the densest file, all of which were over-budget, and
+    /// silently dropped them with no backfill).
+    ///
+    /// Fixture: `dense.go` has 3 TARGET matches inside a huge function
+    /// (over budget), `small1.go` and `small2.go` have 1 TARGET each in
+    /// tiny functions (fit the budget). `max_results=2`, `max_tokens=50`.
+    ///
+    /// Reverting the backfill (pre-selecting survivors then expanding only
+    /// those) REDS this test: the 2 survivors both come from `dense.go`
+    /// (densest), both exceed `max_tokens`, both are dropped → 0 returned.
+    #[test]
+    fn test_search_max_tokens_backfills_fitting_matches() {
+        let dir = TempDir::new().unwrap();
+        // dense.go: 3 matches in a huge function → all exceed max_tokens=50.
+        let huge_padding = "x".repeat(300);
+        write_file(
+            &dir,
+            "dense.go",
+            &format!(
+                "package main\nfunc huge() {{\n    TARGET\n    TARGET\n    TARGET\n    var _ = \"{huge_padding}\"\n}}\n"
+            ),
+        );
+        // small1.go / small2.go: 1 match each in tiny functions → fit.
+        write_file(
+            &dir,
+            "small1.go",
+            "package main\nfunc s1() {\n    TARGET\n}\n",
+        );
+        write_file(
+            &dir,
+            "small2.go",
+            "package main\nfunc s2() {\n    TARGET\n}\n",
+        );
+
+        let mut inp = make_input(dir.path().to_str().unwrap(), "TARGET");
+        inp.language = Some("go".into());
+        inp.expand = ExpandMode::Function;
+        inp.max_results = 2;
+        inp.max_tokens = Some(50);
+
+        let resp = search(inp).unwrap();
+
+        // total_matches = 5 (3 in dense.go + 1 + 1), all raw.
+        assert_eq!(resp.total_matches, 5);
+        // Backfill: 2 fitting matches returned, NOT 0.
+        assert_eq!(
+            resp.matches.len(),
+            2,
+            "backfill should return 2 fitting matches from small files, \
+             not 0 (no-backfill would drop both dense.go survivors)"
+        );
+        // Both returned matches are from the small files (the dense file's
+        // matches were all over-budget).
+        assert!(resp.matches.iter().any(|m| m.file == "small1.go"));
+        assert!(resp.matches.iter().any(|m| m.file == "small2.go"));
+        assert!(resp.matches.iter().all(|m| m.expanded.is_some()));
+        // truncated: total_matches(5) > returned(2).
+        assert!(resp.truncated);
+    }
+
+    /// F2 total_matches test: `total_matches` is the RAW per-file match count
+    /// (pre-`max_tokens`-budget), and `truncated` reflects returned-vs-total.
+    ///
+    /// Fixture: `big.go` has 3 TARGET matches in a huge function (over
+    /// budget), `small.go` has 1 TARGET in a tiny function (fits).
+    /// `max_results=50`, `max_tokens=50`.
+    ///
+    /// Reverting `truncated` to `total_matches > max_results` REDS this test:
+    /// 4 > 50 is false → `truncated` would be false, but we returned 1 of 4
+    /// found matches, so it must be true.
+    #[test]
+    fn test_search_max_tokens_total_matches_is_raw_count() {
+        let dir = TempDir::new().unwrap();
+        let huge_padding = "x".repeat(300);
+        write_file(
+            &dir,
+            "big.go",
+            &format!(
+                "package main\nfunc big() {{\n    TARGET\n    TARGET\n    TARGET\n    var _ = \"{huge_padding}\"\n}}\n"
+            ),
+        );
+        write_file(
+            &dir,
+            "small.go",
+            "package main\nfunc small() {\n    TARGET\n}\n",
+        );
+
+        let mut inp = make_input(dir.path().to_str().unwrap(), "TARGET");
+        inp.language = Some("go".into());
+        inp.expand = ExpandMode::Function;
+        inp.max_results = 50;
+        inp.max_tokens = Some(50);
+
+        let resp = search(inp).unwrap();
+
+        // total_matches = 4 (raw: 3 in big.go + 1 in small.go), NOT 1
+        // (post-max_tokens-filtered).
+        assert_eq!(
+            resp.total_matches, 4,
+            "total_matches must be the raw count, not post-max_tokens"
+        );
+        // Only the small.go match fits → 1 returned.
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].file, "small.go");
+        // truncated = total_matches(4) > returned(1) → true. The old formula
+        // `total_matches > max_results` (4 > 50) would yield false — wrong.
+        assert!(
+            resp.truncated,
+            "truncated must be true: found 4 but returned only 1"
         );
     }
 

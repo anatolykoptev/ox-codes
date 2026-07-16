@@ -25,7 +25,7 @@ const MAX_MAX_RESULTS: usize = 1000;
 /// `null` deserializes to `None` (walks everything) — clamped to this. An
 /// explicit oversized value is also clamped. Without this, a caller can
 /// force a full-repo walk on arbitrarily large repos.
-pub(crate) const MAX_MAX_FILES: usize = 10_000;
+const MAX_MAX_FILES: usize = 10_000;
 
 /// Clamp caller-supplied `max_results` and `max_files` to server-side maximums.
 ///

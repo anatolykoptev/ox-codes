@@ -199,6 +199,14 @@ pub struct ExpandedBlock {
 #[derive(Debug, Serialize)]
 pub struct ExpandedSearchResponse {
     pub matches: Vec<ExpandedMatch>,
+    /// Total matches FOUND (pre-expansion, pre-`max_tokens`-budget). This is
+    /// the raw per-file match count summed across all walked files — cheap
+    /// and well-defined. Under `max_tokens=Some`, matches dropped during
+    /// expansion (over-budget enclosing blocks) are still counted here.
+    /// `truncated` is `total_matches > returned matches count`, so it stays
+    /// truthful after backfill. For the default `max_tokens=None` path this
+    /// equals the post-expansion count (no matches are dropped), so there is
+    /// no drift on the default path.
     pub total_matches: usize,
     pub truncated: bool,
     pub duration_ms: u64,
