@@ -6,11 +6,11 @@ use anyhow::{Result, bail};
 use ast_grep_core::matcher::{Pattern, PatternBuilder, PatternError};
 use ast_grep_core::tree_sitter::{LanguageExt, StrDoc, TSLanguage};
 use ast_grep_core::{AstGrep, Language as AstLang, Matcher};
-use ignore::WalkBuilder;
 use ox_langs::detect_language;
 
 use crate::grep_filter::build_globset;
 use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, StructuralSearchInput};
+use crate::walk::{DEFAULT_MAX_FILE_BYTES, WalkBudget, filtered_walk};
 
 // ── Language wrapper ──────────────────────────────────────────────────────────
 
@@ -251,39 +251,26 @@ pub fn structural_search(input: StructuralSearchInput) -> Result<ExpandedSearchR
         None
     };
 
-    let walker = WalkBuilder::new(root)
-        .standard_filters(true)
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()));
+    // #52: files >20MB are skipped pre-read by `ignore`'s `max_filesize`.
+    // `exts=None` here because structural filters via `file_matches_lang`
+    // (which uses `detect_language` + case-insensitive tsx/jsx matching) —
+    // passing a static extension set would diverge on uppercase extensions.
+    // The byte-cap still applies via `max_filesize` regardless of `exts`.
+    let budget = WalkBudget {
+        max_files: input.max_files,
+        max_file_bytes: Some(DEFAULT_MAX_FILE_BYTES),
+    };
+    let walker = filtered_walk(root, None, include.as_ref(), exclude.as_ref(), budget);
 
-    'files: for entry in walker {
-        let path = entry.path();
-        if !file_matches_lang(path, &lang_name) {
-            continue;
-        }
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include
-            && !inc.is_match(rel)
-        {
-            continue;
-        }
-        if let Some(ref exc) = exclude
-            && exc.is_match(rel)
-        {
+    'files: for (path, rel_path, _metadata) in walker {
+        if !file_matches_lang(&path, &lang_name) {
             continue;
         }
 
-        let src = match std::fs::read_to_string(path) {
+        let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(_) => continue, // skip binary / unreadable files
         };
-
-        let rel_path = path
-            .strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .into_owned();
 
         let ast: AstGrep<StrDoc<LangWrapper>> = AstGrep::new(&src, wrapper.clone());
 
@@ -389,6 +376,7 @@ func foo() error {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -416,6 +404,7 @@ func foo() error {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert_eq!(result.matches.len(), 0);
@@ -452,6 +441,7 @@ func other() {
             expand: ExpandMode::Function,
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert_eq!(result.matches.len(), 1);
@@ -487,6 +477,7 @@ func other() {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -514,6 +505,7 @@ func other() {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -542,6 +534,7 @@ func other() {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -569,6 +562,7 @@ func other() {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -598,6 +592,7 @@ func other() {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -628,6 +623,7 @@ func other() {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -657,6 +653,7 @@ func other() {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -682,6 +679,7 @@ func other() {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = structural_search(input).unwrap();
         assert!(
@@ -689,5 +687,103 @@ func other() {
             "language=typescript should still match .ts file, got: {:?}",
             result.matches
         );
+    }
+
+    // ── PR2: filtered_walk adoption tests ───────────────────────────────
+
+    /// Golden / result-identity test: adopting `filtered_walk` + `WalkBudget`
+    /// did NOT change what `/search/structural` returns for a normal request.
+    /// The match count and line must be exactly what they were before.
+    #[test]
+    fn test_structural_golden_result_identity() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            r#"package main
+
+func foo() error {
+    val, err := doSomething()
+    if err != nil {
+        return err
+    }
+    return nil
+}
+"#,
+        )
+        .unwrap();
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
+        };
+        let result = structural_search(input).unwrap();
+        assert_eq!(
+            result.matches.len(),
+            1,
+            "golden: exactly 1 structural match, got {:?}",
+            result.matches
+        );
+        // The `if err != nil { return err }` is on line 5.
+        assert_eq!(result.matches[0].line, 5);
+    }
+
+    /// Byte-cap test (#52): a file >20MB is skipped pre-read by `ignore`'s
+    /// `max_filesize`. The big file contains a pattern that would match if
+    /// read — asserting its absence proves the byte-cap is active.
+    /// Reverting `max_file_bytes` to `None` REDS this test.
+    #[test]
+    fn test_structural_skips_file_over_20mb() {
+        let dir = TempDir::new().unwrap();
+        // Normal file with a matchable pattern.
+        fs::write(
+            dir.path().join("small.go"),
+            "package main\nfunc small() error {\n    err := f()\n    if err != nil { return err }\n    return nil\n}\n",
+        )
+        .unwrap();
+        // Big file (>20MB) with the same pattern, padded with a long comment.
+        let padding = " ".repeat(21 * 1024 * 1024);
+        let big_content = format!(
+            "package main\nfunc big() error {{\n    err := f()\n    if err != nil {{ return err }}\n    return nil\n}}\n/* {padding} */\n"
+        );
+        fs::write(dir.path().join("big.go"), big_content).unwrap();
+
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
+        };
+        let result = structural_search(input).unwrap();
+        // Exactly 1 match — from the small file only. The big file is skipped.
+        assert_eq!(
+            result.matches.len(),
+            1,
+            "big file (>20MB) must be skipped; expected 1 match from small file only, got {:?}",
+            result.matches
+        );
+        assert_eq!(result.matches[0].file, "small.go");
+    }
+
+    /// Serde default: an absent `max_files` field deserializes to
+    /// `Some(DEFAULT_FILE_COUNT_CAP)` (2000), not `None`.
+    #[test]
+    fn test_structural_max_files_default_is_2000() {
+        let json = r#"{"root":"/tmp","pattern":"$X","language":"go"}"#;
+        let input: StructuralSearchInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.max_files, Some(crate::walk::DEFAULT_FILE_COUNT_CAP));
+        assert_eq!(input.max_files, Some(2000));
     }
 }

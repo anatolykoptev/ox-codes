@@ -4,15 +4,15 @@ use axum::http::StatusCode;
 use ox_core::scoped;
 use ox_core::{ExpandedSearchResponse, ScopedSearchInput};
 
+use crate::dataflow::clamp_max_files;
+use crate::walk_guard::guarded_walk;
+
 pub async fn handle(
     State(state): State<crate::AppState>,
-    Json(input): Json<ScopedSearchInput>,
+    Json(mut input): Json<ScopedSearchInput>,
 ) -> Result<Json<ExpandedSearchResponse>, (StatusCode, String)> {
+    input.max_files = clamp_max_files(input.max_files);
     let scope_cache = state.scope_cache.clone();
-    let result = tokio::task::spawn_blocking(move || scoped::scoped_search(input, &scope_cache))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
+    let result = guarded_walk(move || scoped::scoped_search(input, &scope_cache)).await?;
     Ok(Json(result))
 }

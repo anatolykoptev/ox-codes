@@ -4,15 +4,18 @@ use std::time::Instant;
 use anyhow::Result;
 use axum::Json;
 use axum::http::StatusCode;
-use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 
 use ox_core::grep_filter::build_globset;
+use ox_core::walk::{DEFAULT_FILE_COUNT_CAP, DEFAULT_MAX_FILE_BYTES, WalkBudget, filtered_walk};
 use ox_dataflow::cfg_builder::build_cfg;
 use ox_dataflow::il_builder::build_il_with_ext;
 use ox_dataflow::taint::{TaintFinding, analyze_taint};
 use ox_dataflow::taint_rules::{TaintRule, default_rules};
 use ox_langs::get_language;
+
+use crate::dataflow::clamp_max_files;
+use crate::walk_guard::guarded_walk;
 
 #[derive(Debug, Deserialize)]
 pub struct TaintInput {
@@ -22,6 +25,12 @@ pub struct TaintInput {
     pub rules: Option<Vec<TaintRule>>,
     #[serde(default = "default_max_results")]
     pub max_results: usize,
+    /// Hard cap on files walked. Defaults to
+    /// [`ox_core::walk::DEFAULT_FILE_COUNT_CAP`] (2000). An explicit JSON
+    /// `null` deserializes to `None` (walks everything) — the server clamps
+    /// both `null` and oversized values to its transport max.
+    #[serde(default = "default_max_files")]
+    pub max_files: Option<usize>,
     #[serde(default)]
     pub file_glob: Option<String>,
     #[serde(default)]
@@ -41,14 +50,15 @@ fn default_max_results() -> usize {
     100
 }
 
-pub async fn handle(
-    Json(input): Json<TaintInput>,
-) -> Result<Json<TaintResponse>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(move || analyze(input))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+fn default_max_files() -> Option<usize> {
+    Some(DEFAULT_FILE_COUNT_CAP)
+}
 
+pub async fn handle(
+    Json(mut input): Json<TaintInput>,
+) -> Result<Json<TaintResponse>, (StatusCode, String)> {
+    input.max_files = clamp_max_files(input.max_files);
+    let result = guarded_walk(move || analyze(input)).await?;
     Ok(Json(result))
 }
 
@@ -72,31 +82,21 @@ fn analyze(input: TaintInput) -> Result<TaintResponse> {
     let mut findings = Vec::new();
     let mut files_count = 0;
 
-    for entry in WalkBuilder::new(root)
-        .standard_filters(true)
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-    {
-        let path = entry.path();
+    let budget = WalkBudget {
+        max_files: input.max_files,
+        // #52: files >20MB are skipped pre-read by `ignore`'s `max_filesize`.
+        max_file_bytes: Some(DEFAULT_MAX_FILE_BYTES),
+    };
+    for (path, rel_path, _metadata) in filtered_walk(
+        root,
+        Some(lang_cfg.extensions),
+        include.as_ref(),
+        exclude.as_ref(),
+        budget,
+    ) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !lang_cfg.extensions.contains(&ext) {
-            continue;
-        }
 
-        let rel_path = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include
-            && !inc.is_match(rel_path)
-        {
-            continue;
-        }
-        if let Some(ref exc) = exclude
-            && exc.is_match(rel_path)
-        {
-            continue;
-        }
-
-        let source = match std::fs::read(path) {
+        let source = match std::fs::read(&path) {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -106,10 +106,9 @@ fn analyze(input: TaintInput) -> Result<TaintResponse> {
         };
 
         files_count += 1;
-        let file_str = rel_path.to_string_lossy().to_string();
         for func in &il.functions {
             let cfg = build_cfg(func);
-            findings.extend(analyze_taint(&cfg, &rules, &file_str));
+            findings.extend(analyze_taint(&cfg, &rules, &rel_path));
         }
 
         if findings.len() >= input.max_results * 5 {
@@ -130,4 +129,103 @@ fn analyze(input: TaintInput) -> Result<TaintResponse> {
         truncated,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn taint_input(root: &str) -> TaintInput {
+        TaintInput {
+            root: root.into(),
+            language: "go".into(),
+            rules: None,
+            max_results: 100,
+            max_files: Some(DEFAULT_FILE_COUNT_CAP),
+            file_glob: None,
+            exclude_glob: None,
+        }
+    }
+
+    /// Golden / result-identity test: adopting `filtered_walk` + `guarded_walk`
+    /// did NOT change what `/dataflow/taint` returns for a normal request.
+    /// `files_analyzed` must match the number of qualifying .go files and the
+    /// response shape must be consistent.
+    #[test]
+    fn test_taint_golden_result_identity() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("a.go"),
+            "package main\nfunc a() {\n    x := source()\n    sink(x)\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b.go"),
+            "package main\nfunc b() {\n    y := source()\n    sink(y)\n}\n",
+        )
+        .unwrap();
+
+        let input = taint_input(&dir.path().to_string_lossy());
+        let result = analyze(input).unwrap();
+        assert_eq!(
+            result.files_analyzed, 2,
+            "golden: both .go files must be analyzed"
+        );
+        assert_eq!(
+            result.total_findings,
+            result.findings.len(),
+            "golden: total_findings must equal findings.len() when not truncated"
+        );
+        assert!(
+            !result.truncated,
+            "golden: result must not be truncated for a small fixture"
+        );
+    }
+
+    /// Byte-cap test (#52): a file >20MB is skipped pre-read by `ignore`'s
+    /// `max_filesize`. Only the normal file is analyzed.
+    /// Reverting `max_file_bytes` to `None` REDS this test (files_analyzed → 2).
+    #[test]
+    fn test_taint_skips_file_over_20mb() {
+        let dir = TempDir::new().unwrap();
+        // Normal file.
+        std::fs::write(
+            dir.path().join("small.go"),
+            "package main\nfunc small() {\n    x := source()\n    sink(x)\n}\n",
+        )
+        .unwrap();
+        // Big file (>20MB) padded with a long block comment.
+        let padding = " ".repeat(21 * 1024 * 1024);
+        let big_content = format!(
+            "package main\nfunc big() {{\n    x := source()\n    sink(x)\n}}\n/* {padding} */\n"
+        );
+        std::fs::write(dir.path().join("big.go"), big_content).unwrap();
+
+        let input = taint_input(&dir.path().to_string_lossy());
+        let result = analyze(input).unwrap();
+        assert_eq!(
+            result.files_analyzed, 1,
+            "big file (>20MB) must be skipped by the byte cap; expected files_analyzed=1"
+        );
+    }
+
+    /// Serde default: an absent `max_files` field deserializes to
+    /// `Some(DEFAULT_FILE_COUNT_CAP)` (2000), not `None`.
+    #[test]
+    fn test_taint_max_files_default_is_2000() {
+        let json = r#"{"root":"/tmp","language":"go"}"#;
+        let input: TaintInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.max_files, Some(DEFAULT_FILE_COUNT_CAP));
+        assert_eq!(input.max_files, Some(2000));
+    }
+
+    /// Explicit `null` deserializes to `None` (the server clamps it to
+    /// `MAX_MAX_FILES` via `clamp_max_files`).
+    #[test]
+    fn test_taint_max_files_null_is_none() {
+        let json = r#"{"root":"/tmp","language":"go","max_files":null}"#;
+        let input: TaintInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.max_files, None);
+    }
 }

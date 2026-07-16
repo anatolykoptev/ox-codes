@@ -1,7 +1,6 @@
 use anyhow::Result;
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
-use ignore::WalkBuilder;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,6 +9,7 @@ use tree_sitter::Query;
 use crate::grep_filter::build_globset;
 use crate::scope_cache::{CacheKey, CachedScopes, ScopeCache};
 use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, ScopedSearchInput};
+use crate::walk::{DEFAULT_MAX_FILE_BYTES, WalkBudget, filtered_walk};
 use ox_langs::{effective_language_id, get_language, get_scope_query, language_id};
 
 pub fn scoped_search(
@@ -41,31 +41,21 @@ pub fn scoped_search(
     let mut all_matches: Vec<ExpandedMatch> = Vec::new();
     let root = Path::new(&input.root);
 
-    for entry in WalkBuilder::new(root)
-        .standard_filters(true)
-        .build()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-    {
-        let path = entry.path();
+    let budget = WalkBudget {
+        max_files: input.max_files,
+        // #52: files >20MB are skipped pre-read by `ignore`'s `max_filesize`.
+        max_file_bytes: Some(DEFAULT_MAX_FILE_BYTES),
+    };
+    for (path, rel, _metadata) in filtered_walk(
+        root,
+        Some(lang_cfg.extensions),
+        include.as_ref(),
+        exclude.as_ref(),
+        budget,
+    ) {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !lang_cfg.extensions.contains(&ext) {
-            continue;
-        }
 
-        let rel_path = path.strip_prefix(root).unwrap_or(path);
-        if let Some(ref inc) = include
-            && !inc.is_match(rel_path)
-        {
-            continue;
-        }
-        if let Some(ref exc) = exclude
-            && exc.is_match(rel_path)
-        {
-            continue;
-        }
-
-        let canonical = match std::fs::canonicalize(path) {
+        let canonical = match std::fs::canonicalize(&path) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -115,7 +105,7 @@ pub fn scoped_search(
             &cached,
             &per_file_lang,
             &matcher,
-            &rel_path.to_string_lossy(),
+            &rel,
             &input.expand,
             input.max_tokens,
             input.format,
@@ -271,6 +261,7 @@ type Config struct {
             expand: ExpandMode::default(),
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         }
     }
 
@@ -442,6 +433,7 @@ function App() {
             expand: ExpandMode::None,
             max_tokens: None,
             format: crate::types::Format::Plain,
+            max_files: Some(crate::walk::DEFAULT_FILE_COUNT_CAP),
         };
         let result = scoped_search(input, &ScopeCache::new()).unwrap();
         assert!(
@@ -483,5 +475,83 @@ function App() {
 
         let (_, misses) = cache.stats();
         assert!(misses >= 3, "each file should be parsed at least once");
+    }
+
+    // ── PR2: filtered_walk adoption tests ───────────────────────────────
+
+    /// Golden / result-identity test: adopting `filtered_walk` + `WalkBudget`
+    /// did NOT change what `/search/scoped` returns for a normal request over
+    /// normal-sized files. The match count and line numbers must be exactly
+    /// what they were before the refactor.
+    #[test]
+    fn test_scoped_golden_result_identity() {
+        let dir = setup_go_repo();
+        let input = go_input(&dir.path().to_string_lossy());
+        let result = scoped_search(input, &ScopeCache::new()).unwrap();
+        // `setup_go_repo` has one function `main` (lines 6-9) with two TODO
+        // occurrences inside its body: line 7 (comment) and line 8 (string).
+        // The TODO on line 3 is outside any function body; the one on line 12
+        // is inside a struct, not a function. So exactly 2 matches.
+        assert_eq!(
+            result.matches.len(),
+            2,
+            "golden: exactly 2 TODO matches in function bodies, got {:?}",
+            result.matches
+        );
+        assert_eq!(result.matches[0].line, 7);
+        assert_eq!(result.matches[1].line, 8);
+    }
+
+    /// Byte-cap test (#52): a file >20MB is skipped pre-read by `ignore`'s
+    /// `max_filesize`. The big file contains a unique TODO marker inside a
+    /// function body — if it were read, it would produce a match. Asserting
+    /// its absence proves the byte-cap is active.
+    /// Reverting `max_file_bytes` to `None` REDS this test (the big file is
+    /// read and its marker is found).
+    #[test]
+    fn test_scoped_skips_file_over_20mb() {
+        let dir = TempDir::new().unwrap();
+        // Normal file with a TODO in a function body.
+        fs::write(
+            dir.path().join("small.go"),
+            "package main\nfunc small() {\n    // TODO_SMALL\n}\n",
+        )
+        .unwrap();
+        // Big file (>20MB) with a unique TODO in a function body, padded with
+        // a long block comment to exceed the byte cap.
+        let padding = " ".repeat(21 * 1024 * 1024);
+        let big_content = format!(
+            "package main\nfunc big() {{\n    // TODO_BIG_FILE_MARKER\n}}\n/* {padding} */\n"
+        );
+        fs::write(dir.path().join("big.go"), big_content).unwrap();
+
+        let input = ScopedSearchInput {
+            pattern: "TODO".into(),
+            ..go_input(&dir.path().to_string_lossy())
+        };
+        let result = scoped_search(input, &ScopeCache::new()).unwrap();
+        // The small file's TODO must be found.
+        assert!(
+            result.matches.iter().any(|m| m.text.contains("TODO_SMALL")),
+            "small file's TODO must be found"
+        );
+        // The big file's TODO must NOT be found (byte-cap skipped it).
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.text.contains("TODO_BIG_FILE_MARKER")),
+            "big file (>20MB) must be skipped by the byte cap"
+        );
+    }
+
+    /// Serde default: an absent `max_files` field deserializes to
+    /// `Some(DEFAULT_FILE_COUNT_CAP)` (2000), not `None`.
+    #[test]
+    fn test_scoped_max_files_default_is_2000() {
+        let json = r#"{"root":"/tmp","pattern":"TODO","scope":"function_bodies","language":"go"}"#;
+        let input: ScopedSearchInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.max_files, Some(crate::walk::DEFAULT_FILE_COUNT_CAP));
+        assert_eq!(input.max_files, Some(2000));
     }
 }
