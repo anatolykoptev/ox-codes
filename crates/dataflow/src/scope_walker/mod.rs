@@ -29,12 +29,42 @@ pub fn walk_file_with_ext(source: &[u8], lang_name: &str, file_ext: &str) -> Res
     // silently dropping bindings/refs in or after JSX blocks.  Grammar
     // selection goes through ox_langs::effective_language_id + get_language
     // (the single source of truth) instead of an inline LANGUAGE_TSX literal.
-    let lang: tree_sitter::Language = ox_langs::effective_language_id(lang_name, file_ext)
+    let effective_id = ox_langs::effective_language_id(lang_name, file_ext);
+    let mut lang: tree_sitter::Language = effective_id
         .and_then(|id| ox_langs::get_language(id).map(|c| c.language))
         .unwrap_or_else(|| lq.language().clone());
     let mut parser = Parser::new();
     parser.set_language(&lang)?;
-    let tree = parser.parse(source, None).context("parse failed")?;
+    let mut tree = parser.parse(source, None).context("parse failed")?;
+
+    // Issue #58: .js/.ts files may contain JSX (legacy React). The extension
+    // heuristic selects the non-JSX LANGUAGE_TYPESCRIPT, which produces ERROR
+    // nodes on JSX and silently drops JSX-embedded bindings/refs — the same
+    // failure class as #44 but for .js-with-JSX. When the non-JSX parse has
+    // ERROR/MISSING nodes, re-parse with the JSX-aware LANGUAGE_TSX and keep
+    // whichever yields fewer errors.
+    //
+    // Perf gate: the re-parse is CONDITIONAL — only when the first parse
+    // actually has errors (detected via has_error(), then is_error()/
+    // is_missing() for counting — NOT kind() string compares, the #44/#53
+    // lesson). A clean .js/.ts file (the common case) has zero errors → no
+    // re-parse → zero overhead.
+    if effective_id == Some("typescript") && tree.root_node().has_error() {
+        let tsx_lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+        let mut tsx_parser = Parser::new();
+        if tsx_parser.set_language(&tsx_lang).is_ok()
+            && let Some(tsx_tree) = tsx_parser.parse(source, None)
+        {
+            let non_jsx_errs = count_errors(tree.root_node());
+            let tsx_errs = count_errors(tsx_tree.root_node());
+            #[cfg(test)]
+            REPARSE_COUNT.with(|c| c.set(c.get() + 1));
+            if tsx_errs < non_jsx_errs {
+                lang = tsx_lang;
+                tree = tsx_tree;
+            }
+        }
+    }
 
     let ts_lang = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     let ts_queries = build_ts_queries(&ts_lang)?;
@@ -85,6 +115,38 @@ pub fn walk_file_with_ext(source: &[u8], lang_name: &str, file_ext: &str) -> Res
     Ok(ScopeChain {
         scopes: ctx.finished,
     })
+}
+
+/// Count ERROR and MISSING nodes in a tree using the tree-sitter node API
+/// (`is_error()` / `is_missing()`), NOT `kind()` string compares (the
+/// #44/#53 lesson). Used to pick the parse with fewer errors when falling
+/// back from the non-JSX grammar to `LANGUAGE_TSX` for `.js`/`.ts` files
+/// containing JSX.
+fn count_errors(node: Node) -> usize {
+    let mut count = if node.is_error() || node.is_missing() {
+        1
+    } else {
+        0
+    };
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            count += count_errors(cursor.node());
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    count
+}
+
+// Test-only thread-local counter: incremented each time the #58 ERROR-fallback
+// triggers a TSX re-parse. Tests use this to assert the perf gate (clean
+// `.js`/`.ts` → counter stays 0 → no re-parse) and to confirm the fallback
+// fires for JSX-bearing `.js`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REPARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Build CompiledQueries for TypeScript (used for Svelte secondary parses).

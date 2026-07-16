@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::REPARSE_COUNT;
 use super::{walk_file, walk_file_with_ext};
 
 #[test]
@@ -198,6 +200,125 @@ fn tsx_jsx_reference_not_dropped() {
         !secret.uses.is_empty(),
         "secret must have at least one use (inside JSX {{secret}}), got {} uses",
         secret.uses.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// .js-with-JSX grammar fallback (issue #58)
+// ---------------------------------------------------------------------------
+
+/// A `.js` file containing JSX (legacy React) is sent to the non-JSX
+/// `LANGUAGE_TYPESCRIPT` grammar by the extension heuristic. The non-JSX
+/// grammar produces ERROR nodes on JSX, silently dropping bindings/refs
+/// inside JSX. After the #58 fix (parse-and-detect-ERROR fallback to TSX),
+/// the JSX-embedded reference `{secret}` must be captured.
+#[test]
+fn js_with_jsx_reference_not_dropped() {
+    let src = br#"function App() {
+    const secret = getSecret();
+    return <div>{secret}</div>;
+}
+"#;
+    let chain = walk_file_with_ext(src, "typescript", "js").unwrap();
+    let secret = find_var(&chain, "secret");
+    assert!(
+        secret.is_some(),
+        "secret binding must be found in .js-with-JSX"
+    );
+    let secret = secret.unwrap();
+    assert!(
+        !secret.uses.is_empty(),
+        "secret must have at least one use (inside JSX {{secret}}), got {} uses",
+        secret.uses.len()
+    );
+}
+
+/// Perf gate (issue #58): a clean `.js` file (no JSX, no parse errors) must
+/// NOT trigger the TSX re-parse — the common case pays zero double-parse
+/// overhead. Verified via the `REPARSE_COUNT` thread-local counter.
+#[test]
+fn clean_js_no_reparse() {
+    REPARSE_COUNT.with(|c| c.set(0));
+    let src = br#"function App() {
+    const secret = getSecret();
+    return secret + 1;
+}
+"#;
+    let chain = walk_file_with_ext(src, "typescript", "js").unwrap();
+    assert_eq!(
+        REPARSE_COUNT.with(|c| c.get()),
+        0,
+        "clean .js (no JSX, no errors) must not trigger the TSX re-parse (perf gate)"
+    );
+    let secret = find_var(&chain, "secret").unwrap();
+    assert!(
+        !secret.uses.is_empty(),
+        "secret should still have uses in a clean .js file"
+    );
+}
+
+/// Perf gate (issue #58): a clean `.ts` file must also NOT trigger the
+/// re-parse.
+#[test]
+fn clean_ts_no_reparse() {
+    REPARSE_COUNT.with(|c| c.set(0));
+    let src = br#"function add(a: number, b: number): number {
+    return a + b;
+}
+"#;
+    let chain = walk_file_with_ext(src, "typescript", "ts").unwrap();
+    assert_eq!(
+        REPARSE_COUNT.with(|c| c.get()),
+        0,
+        "clean .ts (no JSX, no errors) must not trigger the TSX re-parse (perf gate)"
+    );
+    let a = find_var(&chain, "a").unwrap();
+    assert!(!a.uses.is_empty(), "param a should have uses");
+}
+
+/// Regression guard (issue #58): `.tsx` files already use the TSX grammar via
+/// the extension heuristic — the #58 fallback must NOT fire for them (no
+/// double re-parse), and JSX-embedded refs must still be captured.
+#[test]
+fn tsx_does_not_trigger_fallback() {
+    REPARSE_COUNT.with(|c| c.set(0));
+    let src = br#"function App() {
+    const secret = getSecret();
+    return <div>{secret}</div>;
+}
+"#;
+    let chain = walk_file_with_ext(src, "typescript", "tsx").unwrap();
+    assert_eq!(
+        REPARSE_COUNT.with(|c| c.get()),
+        0,
+        ".tsx already uses TSX grammar — #58 fallback must not trigger"
+    );
+    let secret = find_var(&chain, "secret").unwrap();
+    assert!(
+        !secret.uses.is_empty(),
+        "secret use in JSX must be captured (unchanged .tsx handling)"
+    );
+}
+
+/// The #58 fallback DOES fire for a JSX-bearing `.js` file — confirmed via
+/// the `REPARSE_COUNT` counter — and recovers the JSX-embedded binding.
+#[test]
+fn js_with_jsx_triggers_reparse() {
+    REPARSE_COUNT.with(|c| c.set(0));
+    let src = br#"function App() {
+    const secret = getSecret();
+    return <div>{secret}</div>;
+}
+"#;
+    let chain = walk_file_with_ext(src, "typescript", "js").unwrap();
+    assert!(
+        REPARSE_COUNT.with(|c| c.get()) > 0,
+        "JSX-bearing .js must trigger the TSX re-parse"
+    );
+    let secret = find_var(&chain, "secret").unwrap();
+    assert!(
+        !secret.uses.is_empty(),
+        "secret use in JSX must be captured after re-parse"
     );
 }
 
