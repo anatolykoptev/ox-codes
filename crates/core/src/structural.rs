@@ -146,6 +146,20 @@ pub(crate) fn file_matches_lang(path: &Path, lang_name: &str) -> bool {
     if detected == lang_name {
         return true;
     }
+    // #56: `detect_language` labels `.tsx`/`.jsx` files as `"typescript"`
+    // (it collapses the whole TS family into one id), so a `language="tsx"`
+    // request — which `lang_wrapper` DOES dispatch to the JSX-aware TSX
+    // grammar — never matched any `.tsx`/`.jsx` file (label `"typescript"` ≠
+    // requested `"tsx"`), yielding zero results silently.  Distinguish by
+    // file extension so only `.tsx`/`.jsx` files match a `"tsx"` request;
+    // `.ts`/`.js` files (also labelled `"typescript"`) must NOT, since they
+    // are not JSX and the TSX grammar would mis-handle them.
+    if lang_name == "tsx"
+        && let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && (ext.eq_ignore_ascii_case("tsx") || ext.eq_ignore_ascii_case("jsx"))
+    {
+        return true;
+    }
     // Handle aliases
     matches!(
         (lang_name, detected),
@@ -589,6 +603,91 @@ func other() {
         assert!(
             !result.matches.is_empty(),
             "$RECV.Method($X, $$$) should match multi-arg method call"
+        );
+    }
+
+    /// Regression for #56: `/search/structural` with `language="tsx"` over a
+    /// directory containing a `.tsx` file must return matches.  Previously
+    /// `detect_language(.tsx)` returned `"typescript"`, which never equalled a
+    /// `"tsx"` request, so zero `.tsx` files were ever scanned.
+    #[test]
+    fn test_structural_tsx_matches_tsx_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("App.tsx"),
+            "const App = () => <div>hello</div>;\n",
+        )
+        .unwrap();
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "const $NAME = $$$".into(),
+            language: "tsx".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = structural_search(input).unwrap();
+        assert!(
+            !result.matches.is_empty(),
+            "language=tsx should match .tsx file, got: {:?}",
+            result.matches
+        );
+    }
+
+    /// #56 companion: `.jsx` files must also be matched by `language="tsx"`
+    /// (the TSX grammar covers JSX).
+    #[test]
+    fn test_structural_tsx_matches_jsx_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("Card.jsx"),
+            "const Card = () => <span>x</span>;\n",
+        )
+        .unwrap();
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "const $NAME = $$$".into(),
+            language: "tsx".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = structural_search(input).unwrap();
+        assert!(
+            !result.matches.is_empty(),
+            "language=tsx should match .jsx file, got: {:?}",
+            result.matches
+        );
+    }
+
+    /// #56 regression guard: a `language="typescript"` request over a `.ts`
+    /// file is unaffected by the tsx-labelling fix.
+    #[test]
+    fn test_structural_typescript_matches_ts_file_unaffected() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("util.ts"), "const answer = 42;\n").unwrap();
+        let input = StructuralSearchInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "const $NAME = $$$".into(),
+            language: "typescript".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            expand: ExpandMode::default(),
+            max_tokens: None,
+            format: crate::types::Format::Plain,
+        };
+        let result = structural_search(input).unwrap();
+        assert!(
+            !result.matches.is_empty(),
+            "language=typescript should still match .ts file, got: {:?}",
+            result.matches
         );
     }
 }
