@@ -174,11 +174,11 @@ fn rust_rules() -> Vec<TaintRule> {
             id: "rust-command-injection".into(),
             sources: vec![
                 TaintSource {
-                    pattern: "env::var".into(),
+                    pattern: "var".into(),
                     tag: "env".into(),
                 },
                 TaintSource {
-                    pattern: "env::args".into(),
+                    pattern: "args".into(),
                     tag: "user_input".into(),
                 },
                 TaintSource {
@@ -192,13 +192,13 @@ fn rust_rules() -> Vec<TaintRule> {
             ],
             sinks: vec![
                 TaintSink {
-                    pattern: "Command::new".into(),
+                    pattern: "new".into(),
                     arg_index: 0,
                     cwe: "CWE-78".into(),
                     description: "User input in command execution".into(),
                 },
                 TaintSink {
-                    pattern: "Command::arg".into(),
+                    pattern: "arg".into(),
                     arg_index: 0,
                     cwe: "CWE-78".into(),
                     description: "User input in command argument".into(),
@@ -219,7 +219,7 @@ fn rust_rules() -> Vec<TaintRule> {
             id: "rust-path-traversal".into(),
             sources: vec![
                 TaintSource {
-                    pattern: "env::args".into(),
+                    pattern: "args".into(),
                     tag: "user_input".into(),
                 },
                 TaintSource {
@@ -239,13 +239,13 @@ fn rust_rules() -> Vec<TaintRule> {
                     description: "Path traversal via file read".into(),
                 },
                 TaintSink {
-                    pattern: "fs::write".into(),
+                    pattern: "write".into(),
                     arg_index: 0,
                     cwe: "CWE-22".into(),
                     description: "Path traversal via file write".into(),
                 },
                 TaintSink {
-                    pattern: "File::open".into(),
+                    pattern: "open".into(),
                     arg_index: 0,
                     cwe: "CWE-22".into(),
                     description: "Path traversal via file open".into(),
@@ -262,7 +262,7 @@ fn rust_rules() -> Vec<TaintRule> {
                     pattern: "canonicalize".into(),
                 },
                 Sanitizer {
-                    pattern: "Path::clean".into(),
+                    pattern: "clean".into(),
                 },
             ],
             severity: "error".into(),
@@ -272,7 +272,7 @@ fn rust_rules() -> Vec<TaintRule> {
             id: "rust-deserialization".into(),
             sources: vec![
                 TaintSource {
-                    pattern: "reqwest::get".into(),
+                    pattern: "get".into(),
                     tag: "network".into(),
                 },
                 TaintSource {
@@ -306,7 +306,7 @@ fn rust_rules() -> Vec<TaintRule> {
             id: "rust-sql-injection".into(),
             sources: vec![
                 TaintSource {
-                    pattern: "env::var".into(),
+                    pattern: "var".into(),
                     tag: "env".into(),
                 },
                 TaintSource {
