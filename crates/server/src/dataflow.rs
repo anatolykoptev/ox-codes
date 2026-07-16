@@ -35,8 +35,18 @@ const MAX_MAX_FILES: usize = 10_000;
 /// and multi-minute walks on large repos.
 fn clamp_input(mut input: DataflowInput) -> DataflowInput {
     input.max_results = input.max_results.min(MAX_MAX_RESULTS);
-    input.max_files = Some(input.max_files.unwrap_or(MAX_MAX_FILES).min(MAX_MAX_FILES));
+    input.max_files = clamp_max_files(input.max_files);
     input
+}
+
+/// Clamp caller-supplied `max_files` to the server-side transport maximum.
+///
+/// An explicit JSON `null` deserializes to `None` (walks everything) — clamped
+/// to `MAX_MAX_FILES`. An explicit oversized value is also clamped. Shared by
+/// `/dataflow/analyze`, `/search/scoped`, `/search/structural`, and
+/// `/dataflow/taint` so every walk-based endpoint applies the same ceiling.
+pub(crate) fn clamp_max_files(max_files: Option<usize>) -> Option<usize> {
+    Some(max_files.unwrap_or(MAX_MAX_FILES).min(MAX_MAX_FILES))
 }
 
 pub async fn handle(
@@ -285,6 +295,23 @@ mod tests {
         let clamped = clamp_input(input);
         assert_eq!(clamped.max_results, 50);
         assert_eq!(clamped.max_files, Some(500));
+    }
+
+    /// `clamp_max_files` is the shared helper used by `/dataflow/analyze`,
+    /// `/search/scoped`, `/search/structural`, and `/dataflow/taint`. It must
+    /// clamp both `None` (explicit JSON `null`) and oversized values to
+    /// `MAX_MAX_FILES`, and pass in-range values through unchanged.
+    /// Reverting the clamp (returning the input unchanged) REDS this test.
+    #[test]
+    fn test_clamp_max_files_shared_helper() {
+        // Explicit null → None → clamped to MAX_MAX_FILES.
+        assert_eq!(clamp_max_files(None), Some(MAX_MAX_FILES));
+        // Oversized → clamped to MAX_MAX_FILES.
+        assert_eq!(clamp_max_files(Some(50_000)), Some(MAX_MAX_FILES));
+        assert_eq!(clamp_max_files(Some(MAX_MAX_FILES)), Some(MAX_MAX_FILES));
+        // In-range → passed through.
+        assert_eq!(clamp_max_files(Some(500)), Some(500));
+        assert_eq!(clamp_max_files(Some(1)), Some(1));
     }
 
     /// Verifies that analyze_directory stops at max_files even when the

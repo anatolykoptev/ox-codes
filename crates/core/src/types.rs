@@ -37,6 +37,12 @@ pub struct SearchInput {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub format: Format,
+    /// Hard cap on files walked. Defaults to
+    /// [`crate::walk::DEFAULT_FILE_COUNT_CAP`] (2000). An explicit JSON `null`
+    /// deserializes to `None` (walks everything) — the server clamps both
+    /// `null` and oversized values to its transport max.
+    #[serde(default = "default_max_files")]
+    pub max_files: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +67,12 @@ pub struct ScopedSearchInput {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub format: Format,
+    /// Hard cap on files walked. Defaults to
+    /// [`crate::walk::DEFAULT_FILE_COUNT_CAP`] (2000). An explicit JSON `null`
+    /// deserializes to `None` (walks everything) — the server clamps both
+    /// `null` and oversized values to its transport max.
+    #[serde(default = "default_max_files")]
+    pub max_files: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +92,12 @@ pub struct StructuralSearchInput {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub format: Format,
+    /// Hard cap on files walked. Defaults to
+    /// [`crate::walk::DEFAULT_FILE_COUNT_CAP`] (2000). An explicit JSON `null`
+    /// deserializes to `None` (walks everything) — the server clamps both
+    /// `null` and oversized values to its transport max.
+    #[serde(default = "default_max_files")]
+    pub max_files: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,6 +199,14 @@ pub struct ExpandedBlock {
 #[derive(Debug, Serialize)]
 pub struct ExpandedSearchResponse {
     pub matches: Vec<ExpandedMatch>,
+    /// Total matches FOUND (pre-expansion, pre-`max_tokens`-budget). This is
+    /// the raw per-file match count summed across all walked files — cheap
+    /// and well-defined. Under `max_tokens=Some`, matches dropped during
+    /// expansion (over-budget enclosing blocks) are still counted here.
+    /// `truncated` is `total_matches > returned matches count`, so it stays
+    /// truthful after backfill. For the default `max_tokens=None` path this
+    /// equals the post-expansion count (no matches are dropped), so there is
+    /// no drift on the default path.
     pub total_matches: usize,
     pub truncated: bool,
     pub duration_ms: u64,
@@ -200,6 +226,9 @@ fn default_context_lines() -> usize {
 }
 fn default_max_results() -> usize {
     50
+}
+fn default_max_files() -> Option<usize> {
+    Some(crate::walk::DEFAULT_FILE_COUNT_CAP)
 }
 fn default_true() -> bool {
     true
