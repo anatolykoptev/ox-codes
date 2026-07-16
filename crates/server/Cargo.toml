@@ -1,6 +1,6 @@
 [package]
 name = "ox-server"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,9 +10,9 @@ keywords = ["code-search", "http-api", "axum", "static-analysis"]
 categories = ["development-tools", "web-programming::http-server"]
 
 [dependencies]
-ox-core = { path = "../core", version = "0.1.1" }
-ox-dataflow = { path = "../dataflow", version = "0.1.1" }
-ox-langs = { path = "../langs", version = "0.1.1" }
+ox-core = { path = "../core", version = "0.1.2" }
+ox-dataflow = { path = "../dataflow", version = "0.1.2" }
+ox-langs = { path = "../langs", version = "0.1.2" }
 axum = "0.8"
 tokio.workspace = true
 serde.workspace = true

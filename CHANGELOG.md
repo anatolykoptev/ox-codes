@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.1.2](https://github.com/anatolykoptev/ox-codes/compare/v0.1.1...v0.1.2) (2026-07-16)
+
+
+### Added
+
+* **walk:** guard + budget /rewrite with surfaced oversize-skip, completes the walk-budget arc ([#57](https://github.com/anatolykoptev/ox-codes/issues/57) PR3) ([#73](https://github.com/anatolykoptev/ox-codes/issues/73)) ([012e590](https://github.com/anatolykoptev/ox-codes/commit/012e5904e00eeb8681c125fa6ffabab5344f8df4))
+* **walk:** guard + clamp + byte-cap the 4 read-only endpoints, grep truncate-before-expand ([#57](https://github.com/anatolykoptev/ox-codes/issues/57) PR2) ([#72](https://github.com/anatolykoptev/ox-codes/issues/72)) ([3459a9d](https://github.com/anatolykoptev/ox-codes/commit/3459a9d9fba0243ea4caa2c0a3e5c3c609fd6744))
+
+
+### Fixed
+
+* **cache:** loud TTL=0 backstop-disabled warning + is_hit observability signal ([#62](https://github.com/anatolykoptev/ox-codes/issues/62)) ([5a5c622](https://github.com/anatolykoptev/ox-codes/commit/5a5c622205a81156bcafb4c68a6a9c4b04f312ab))
+* **dataflow+core+langs:** JSX-aware grammar across all TS routes + is_ts_secondary save/restore ([#44](https://github.com/anatolykoptev/ox-codes/issues/44), [#49](https://github.com/anatolykoptev/ox-codes/issues/49)) ([cebb54f](https://github.com/anatolykoptev/ox-codes/commit/cebb54fa0d4e76dde5e20482ef0e8b11ebb331ca))
+* **dataflow:** defer Svelte template refs when script follows template ([#38](https://github.com/anatolykoptev/ox-codes/issues/38)) ([509faf1](https://github.com/anatolykoptev/ox-codes/commit/509faf199af6ee9472cb5262bcfc69414ccc81c0)), closes [#15](https://github.com/anatolykoptev/ox-codes/issues/15)
+* **dataflow:** parse-and-detect-ERROR fallback for JSX in .js/.ts files ([#70](https://github.com/anatolykoptev/ox-codes/issues/70)) ([3c5df55](https://github.com/anatolykoptev/ox-codes/commit/3c5df554039b6d539eb2333b479febe4daff4f23))
+* **dataflow:** track taint through object/array destructuring declarators ([#63](https://github.com/anatolykoptev/ox-codes/issues/63)) ([130aa5e](https://github.com/anatolykoptev/ox-codes/commit/130aa5ee1593d70a69747a2a3edbc3ba43be773e)), closes [#59](https://github.com/anatolykoptev/ox-codes/issues/59)
+* harden dataflow cache key + TTL/BYTES escape hatches ([#29](https://github.com/anatolykoptev/ox-codes/issues/29)) ([#40](https://github.com/anatolykoptev/ox-codes/issues/40)) ([64eb777](https://github.com/anatolykoptev/ox-codes/commit/64eb777bb6e8b575efe77c60dd54e714822f6b1b))
+* **langs:** /search/structural language=tsx now matches .tsx/.jsx files ([#68](https://github.com/anatolykoptev/ox-codes/issues/68)) ([799a4c9](https://github.com/anatolykoptev/ox-codes/commit/799a4c97b87fa9e9cd1b8305f3508426f27a8e07)), closes [#56](https://github.com/anatolykoptev/ox-codes/issues/56)
+* **rewrite:** harden /rewrite write path vs silent corruption + lost updates ([#41](https://github.com/anatolykoptev/ox-codes/issues/41), [#47](https://github.com/anatolykoptev/ox-codes/issues/47)) ([30ad140](https://github.com/anatolykoptev/ox-codes/commit/30ad140c9395da26a0e5bbd6ea8585baa5bfd8bb))
+* **server:** dataflow walk-pool timeout + byte-weighed cache + exact-cap truncation ([#43](https://github.com/anatolykoptev/ox-codes/issues/43), [#45](https://github.com/anatolykoptev/ox-codes/issues/45), [#50](https://github.com/anatolykoptev/ox-codes/issues/50)) ([#60](https://github.com/anatolykoptev/ox-codes/issues/60)) ([547d75a](https://github.com/anatolykoptev/ox-codes/commit/547d75a8afcb3bb0a1f11532a25d23ff5cb0fdad))
+
+
+### Changed
+
+* **cache:** extract shared WeightedEnvCache&lt;K,V&gt; from Scope/Dataflow caches ([#65](https://github.com/anatolykoptev/ox-codes/issues/65)) ([2534cd7](https://github.com/anatolykoptev/ox-codes/commit/2534cd75c648f7f4259eda0373b16369827d4b42))
+* **rewrite:** reuse ast_grep_core for the re-parse invariant, drop the double raw tree_sitter parse ([#66](https://github.com/anatolykoptev/ox-codes/issues/66)) ([56f7934](https://github.com/anatolykoptev/ox-codes/commit/56f79344e77d42eff76983321def1cf9c8b9f860))
+* **walk:** extract ox-core::walk + ox-server::walk_guard, rewire /dataflow/analyze ([#57](https://github.com/anatolykoptev/ox-codes/issues/57) PR1) ([#71](https://github.com/anatolykoptev/ox-codes/issues/71)) ([ae2cfc7](https://github.com/anatolykoptev/ox-codes/commit/ae2cfc74f8c00688af785ef1bab9181c509a3da3))
+
+
+### Documentation
+
+* drop broken docs/architecture link from README ([#36](https://github.com/anatolykoptev/ox-codes/issues/36)) ([5fbf040](https://github.com/anatolykoptev/ox-codes/commit/5fbf040731dad826cb86536b8d83755071b9eba3))
+
 ## [0.1.1](https://github.com/anatolykoptev/ox-codes/compare/v0.1.0...v0.1.1) (2026-07-15)
 
 
