@@ -1,6 +1,6 @@
 [package]
 name = "ox-core"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,7 +10,7 @@ keywords = ["code-search", "ripgrep", "tree-sitter", "ast-grep", "refactoring"]
 categories = ["development-tools", "parsing"]
 
 [dependencies]
-ox-langs = { path = "../langs", version = "0.1.1" }
+ox-langs = { path = "../langs", version = "0.1.2" }
 grep-regex = "0.1"
 grep-searcher = "0.1"
 grep-matcher = "0.1"
