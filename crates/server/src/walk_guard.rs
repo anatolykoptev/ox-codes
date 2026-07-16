@@ -136,23 +136,61 @@ async fn acquire_walk_permit(
 ///
 /// Error mapping: permit-acquire timeout → 503; request deadline → 504;
 /// `JoinError` (panic) → 500; engine `Err` → 400.
+///
+/// Shared-budget contract — `WALK_SEMAPHORE` is a SINGLE process-global walk
+/// budget (8 permits) shared across ALL endpoints that route through
+/// `guarded_walk` (today: `/dataflow/analyze`; PR2/PR3 will add `/taint`,
+/// `/structural`, …). This is the INTENDED single-pool design per the
+/// architecture decision: a busy `/taint` or `/structural` burst CAN 503
+/// `/dataflow/analyze` — there is NO per-endpoint isolation. Authors wiring
+/// new callers in PR2/PR3 must NOT spin up a per-endpoint semaphore; reuse
+/// this primitive so the whole process stays bounded to `SEMAPHORE_PERMITS`
+/// concurrent walks.
 pub(crate) async fn guarded_walk<T, F>(f: F) -> Result<T, (StatusCode, String)>
+where
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    // Thin wrapper over the parameterized inner — keeps the PRODUCTION
+    // behavior byte-identical (same statics, same timeouts) while letting the
+    // direct-seam test drive `guarded_walk_inner` with dedicated test-only
+    // statics + tiny timeouts for deterministic 503/504/500/400 assertions.
+    guarded_walk_inner(
+        &WALK_SEMAPHORE,
+        &WALK_METRICS,
+        Duration::from_secs(WALK_ACQUIRE_TIMEOUT_SECS),
+        Duration::from_secs(DATAFLOW_TIMEOUT_SECS),
+        f,
+    )
+    .await
+}
+
+/// Parameterized core of [`guarded_walk`]. Exposed (crate-private) so the
+/// direct-seam test can drive the REAL composition with dedicated test-only
+/// `static Semaphore` + `static WalkMetrics` + tiny timeouts — making the
+/// 503/504/500/400 outcomes deterministic regardless of parallel-test
+/// interleaving on the module-global `WALK_SEMAPHORE`/`WALK_METRICS` and the
+/// real 5s/25s timeouts. The body is verbatim the previous `guarded_walk`
+/// body; the public wrapper preserves production behavior byte-identical.
+pub(crate) async fn guarded_walk_inner<T, F>(
+    sem: &'static Semaphore,
+    metrics: &'static WalkMetrics,
+    acquire_timeout: Duration,
+    request_timeout: Duration,
+    f: F,
+) -> Result<T, (StatusCode, String)>
 where
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
     T: Send + 'static,
 {
     // Acquire a walk permit with a bounded timeout. If all permits are held
     // by in-flight walks, fail fast with 503 instead of queueing forever.
-    let permit = acquire_walk_permit(
-        &WALK_SEMAPHORE,
-        Duration::from_secs(WALK_ACQUIRE_TIMEOUT_SECS),
-    )
-    .await?;
+    let permit = acquire_walk_permit(sem, acquire_timeout).await?;
 
     // Track the walk for staleness observability. The slot is moved into the
     // spawn_blocking closure so it is dropped when the walk finishes (even on
     // panic or timeout — the phantom task eventually completes and drops it).
-    let slot = WALK_METRICS.acquire_slot();
+    let slot = metrics.acquire_slot();
 
     let task = tokio::task::spawn_blocking(move || {
         // Keep the permit and slot alive until the blocking task finishes.
@@ -163,7 +201,7 @@ where
         f()
     });
 
-    let result = tokio::time::timeout(Duration::from_secs(DATAFLOW_TIMEOUT_SECS), task)
+    let result = tokio::time::timeout(request_timeout, task)
         .await
         .map_err(|_| {
             (
@@ -406,6 +444,195 @@ mod semaphore_tests {
         assert!(
             msg.contains("saturated"),
             "error message should mention saturation: {msg}"
+        );
+    }
+}
+
+/// Direct-seam tests for [`guarded_walk_inner`] — the parameterized core of
+/// `guarded_walk`. The moved concurrency test
+/// `concurrent_walks_through_real_path_drop_balances` HAND-COPIES the
+/// composition (calls `acquire_walk_permit` + `acquire_slot` + `spawn_blocking`
+/// and re-composes them in its own closure) — it does NOT call `guarded_walk`
+/// itself, so a composition regression (swapping the two `.map_err` arms, or
+/// hoisting the permit/slot OUT of the `spawn_blocking` closure) would land
+/// GREEN. These tests call the REAL seam (`guarded_walk_inner`) and assert the
+/// four error outcomes + the happy path, closing that regression gap.
+///
+/// Determinism — each test gets its OWN dedicated `static Semaphore` +
+/// `static WalkMetrics` pair (NOT the production `WALK_SEMAPHORE`/
+/// `WALK_METRICS`, and NOT shared with each other). This matters because the
+/// 504 sub-case's `spawn_blocking` closure cannot be cancelled — after the
+/// 20ms request timeout fires the phantom task keeps sleeping for ~200ms and
+/// keeps its `WalkSlot`/permit alive; if it shared `METRICS_OK` with the
+/// happy-path test, the happy-path `in_flight == 0` assertion could race with
+/// that lingering slot. Per-test statics make every assertion deterministic
+/// regardless of parallel-test interleaving.
+///
+/// Revert-reds (verified by hand): swapping the two `.map_err` arms (so
+/// `JoinError` → 400 and engine `Err` → 500) REDS both
+/// `guarded_walk_500_on_closure_panic` (expects 500, would get 400) and
+/// `guarded_walk_400_on_closure_err` (expects 400, would get 500). Hoisting
+/// the `let slot = metrics.acquire_slot();` ABOVE the `acquire_walk_permit`
+/// call (outside the spawn_blocking closure is already not the case, but
+/// moving the permit acquire outside the closure) would break the
+/// drop-balancing — covered by the existing concurrency test. The 503/504
+/// outcomes RED if the corresponding `map_err` arm is removed or the timeout
+/// is dropped.
+#[cfg(test)]
+mod guarded_walk_seam_tests {
+    use super::*;
+
+    // ── Per-test dedicated statics ───────────────────────────────────────
+    // Single-permit sem for the 503 saturation case.
+    static SEM_503: Semaphore = Semaphore::const_new(1);
+    static METRICS_503: WalkMetrics = WalkMetrics::new_const();
+    // Dedicated pair for the 504 case (its phantom task lingers ~200ms).
+    static SEM_504: Semaphore = Semaphore::const_new(2);
+    static METRICS_504: WalkMetrics = WalkMetrics::new_const();
+    // Dedicated pair for the 500 panic case.
+    static SEM_500: Semaphore = Semaphore::const_new(2);
+    static METRICS_500: WalkMetrics = WalkMetrics::new_const();
+    // Dedicated pair for the 400 err case.
+    static SEM_400: Semaphore = Semaphore::const_new(2);
+    static METRICS_400: WalkMetrics = WalkMetrics::new_const();
+    // Dedicated pair for the happy-path case (in_flight==0 assertion).
+    static SEM_OK: Semaphore = Semaphore::const_new(2);
+    static METRICS_OK: WalkMetrics = WalkMetrics::new_const();
+
+    /// 503: a saturated permit set must fail fast with SERVICE_UNAVAILABLE.
+    /// REDS if the `acquire_walk_permit` 503 `map_err` arm is dropped (would
+    /// hang/return INTERNAL_SERVER_ERROR instead).
+    #[tokio::test]
+    async fn guarded_walk_503_on_saturated_semaphore() {
+        // Pre-acquire the only permit; hold it for the whole test so the
+        // inner acquire must time out.
+        let _blocker = SEM_503.acquire().await.unwrap();
+        let result: Result<(), (StatusCode, String)> = guarded_walk_inner(
+            &SEM_503,
+            &METRICS_503,
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            || Ok(()),
+        )
+        .await;
+        let (status, msg) = result.expect_err("saturated pool should 503");
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "saturated pool should return 503"
+        );
+        assert!(
+            msg.contains("saturated"),
+            "error message should mention saturation: {msg}"
+        );
+        // No slot was acquired (acquire failed first), so in_flight stays 0.
+        let (in_flight, _) = METRICS_503.stats();
+        assert_eq!(in_flight, 0, "failed acquire must not acquire a slot");
+    }
+
+    /// 504: a closure that exceeds the request deadline must return
+    /// GATEWAY_TIMEOUT. REDS if the outer `tokio::time::timeout` 504 `map_err`
+    /// arm is dropped (would await the unbounded sleep instead).
+    #[tokio::test]
+    async fn guarded_walk_504_on_request_deadline_exceeded() {
+        let result: Result<(), (StatusCode, String)> = guarded_walk_inner(
+            &SEM_504,
+            &METRICS_504,
+            Duration::from_secs(5),
+            Duration::from_millis(20),
+            || {
+                // spawn_blocking cannot be cancelled — this sleeps well past
+                // the 20ms request timeout, holding its slot/permit in the
+                // phantom task. We do NOT assert in_flight here (the slot is
+                // still held when this test returns); the dedicated METRICS_OK
+                // pair handles the drop-balance assertion.
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(())
+            },
+        )
+        .await;
+        let (status, msg) = result.expect_err("slow closure should 504");
+        assert_eq!(
+            status,
+            StatusCode::GATEWAY_TIMEOUT,
+            "request deadline exceeded should return 504"
+        );
+        assert!(
+            msg.contains("time limit"),
+            "error message should mention the time limit: {msg}"
+        );
+    }
+
+    /// 500: a panicking closure propagates as a JoinError → INTERNAL_SERVER_ERROR.
+    /// REDS if the JoinError `map_err` arm is swapped onto the engine-Err arm
+    /// (panic would then map to 400 instead of 500).
+    #[tokio::test]
+    async fn guarded_walk_500_on_closure_panic() {
+        let result: Result<(), (StatusCode, String)> = guarded_walk_inner(
+            &SEM_500,
+            &METRICS_500,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            || panic!("intentional panic in guarded_walk closure"),
+        )
+        .await;
+        let (status, _msg) = result.expect_err("panic should 500");
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "closure panic (JoinError) should return 500"
+        );
+    }
+
+    /// 400: a closure returning `Err(anyhow!())` maps to BAD_REQUEST and the
+    /// message is preserved. REDS if the engine-Err `map_err` arm is swapped
+    /// onto the JoinError arm (engine Err would then map to 500 instead of 400).
+    #[tokio::test]
+    async fn guarded_walk_400_on_closure_err() {
+        let result: Result<(), (StatusCode, String)> = guarded_walk_inner(
+            &SEM_400,
+            &METRICS_400,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            || Err(anyhow::anyhow!("boom")),
+        )
+        .await;
+        let (status, msg) = result.expect_err("closure Err should 400");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "engine Err should return 400"
+        );
+        assert!(
+            msg.contains("boom"),
+            "error message should preserve the engine error text: {msg}"
+        );
+    }
+
+    /// Happy path: `Ok(v)` returns `Ok(v)` and `in_flight` returns to 0 after.
+    /// REDS if the `Ok(result)` return is dropped/mis-mapped, or if the
+    /// `WalkSlot` is not moved into the closure (in_flight would stay 1).
+    #[tokio::test]
+    async fn guarded_walk_ok_returns_value_and_balances_metrics() {
+        let result: Result<u32, (StatusCode, String)> = guarded_walk_inner(
+            &SEM_OK,
+            &METRICS_OK,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            || Ok(42u32),
+        )
+        .await;
+        assert_eq!(
+            result.expect("happy path should return Ok(42)"),
+            42,
+            "Ok value must pass through unchanged"
+        );
+        let (in_flight, _) = METRICS_OK.stats();
+        assert_eq!(
+            in_flight, 0,
+            "in_flight must return to 0 after the happy path; a non-zero value \
+             means the WalkSlot was not moved into the spawn_blocking closure \
+             (or was leaked)"
         );
     }
 }

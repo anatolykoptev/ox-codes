@@ -6,7 +6,18 @@ use ignore::WalkBuilder;
 /// Default cap on the number of files a single walk visits. Callers that
 /// pass `None` for `max_files` walk without a count cap (but may still be
 /// bounded by `max_file_bytes`).
-pub const DEFAULT_MAX_FILES: usize = 2000;
+///
+/// NOTE — this is ox-core's OWN forward-looking scaffolding constant. It is
+/// intentionally NOT cross-imported from ox-dataflow (that would break the
+/// peer-independence fitness function — `grep ox_core crates/dataflow/` must
+/// stay empty). ox-dataflow keeps its own `DEFAULT_MAX_FILES = 2000` at
+/// `crates/dataflow/src/types.rs`, and the server clamps caller-supplied
+/// `max_files` at `MAX_MAX_FILES = 10_000` (`crates/server/src/dataflow.rs`).
+/// These three values are a same-name/same-value trap that must be
+/// reconciled when PR2 wires a real caller of this constant; the distinct
+/// name (`DEFAULT_FILE_COUNT_CAP` vs ox-dataflow's `DEFAULT_MAX_FILES`)
+/// makes a future desync visible at the call-site rather than silent.
+pub const DEFAULT_FILE_COUNT_CAP: usize = 2000;
 
 /// Default per-file byte cap. Callers that pass `None` for `max_file_bytes`
 /// walk files of any size. This is ox-core's own constant — it is independent
