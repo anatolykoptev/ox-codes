@@ -5,6 +5,7 @@ mod scoped;
 mod search;
 mod structural;
 mod taint;
+mod walk_guard;
 
 pub use dataflow_cache::DataflowCache;
 
@@ -71,7 +72,7 @@ async fn health() -> &'static str {
 async fn cache_stats(State(state): State<AppState>) -> Json<CacheStatsResponse> {
     let (scope_hits, scope_misses) = state.scope_cache.stats();
     let (dataflow_hits, dataflow_misses, _dataflow_analyses) = state.dataflow_cache.stats();
-    let (walk_in_flight, walk_oldest_start) = dataflow::walk_metrics();
+    let (walk_in_flight, walk_oldest_start) = walk_guard::walk_metrics();
 
     Json(CacheStatsResponse {
         scope: CacheStatsEntry {
