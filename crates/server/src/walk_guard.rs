@@ -9,6 +9,17 @@ use tokio::sync::Semaphore;
 /// the timeout fires, but the HTTP response is returned immediately.
 const DATAFLOW_TIMEOUT_SECS: u64 = 25;
 
+/// Hard deadline for a single `/rewrite` request. The read-path
+/// `DATAFLOW_TIMEOUT_SECS` (25s) is tuned for read-only analysis; a bulk
+/// rewrite (up to 10_000 files × read+parse+persist) can legitimately exceed
+/// it, so the pre-PR3 unbounded `/rewrite` now falsely 504'd on a normal large
+/// rewrite. This generous deadline (operator-tunable) restores the pre-PR
+/// behavior — a legitimate rewrite completes and returns 200 — while keeping
+/// the 503 acquire-timeout + the walk caps. Note: `spawn_blocking` is still
+/// uncancellable, so a 504 from `/rewrite` means the rewrite MAY have
+/// partially or fully applied (see the `/rewrite` handler doc-comment).
+pub(crate) const REWRITE_TIMEOUT_SECS: u64 = 300;
+
 /// Maximum concurrent directory walks. Each walk can be CPU/IO-heavy; capping
 /// at 8 (2x the 4 ARM cores) prevents phantom tasks from saturating the Tokio
 /// blocking pool (default 512 threads) during bursts of oversized-repo requests.
@@ -160,6 +171,38 @@ where
         &WALK_METRICS,
         Duration::from_secs(WALK_ACQUIRE_TIMEOUT_SECS),
         Duration::from_secs(DATAFLOW_TIMEOUT_SECS),
+        f,
+    )
+    .await
+}
+
+/// Run a blocking walk under the shared walk-pool guard with a CALLER-SUPPLIED
+/// request deadline. Identical to [`guarded_walk`] except the request deadline
+/// is parameterized (not hardcoded to `DATAFLOW_TIMEOUT_SECS`). Used by
+/// `/rewrite`, which needs a generous deadline (`REWRITE_TIMEOUT_SECS`, 300s)
+/// because a bulk write (up to 10_000 files × read+parse+persist) can
+/// legitimately exceed the 25s read-analysis deadline — restoring the pre-PR3
+/// unbounded behavior so a normal large rewrite completes and returns 200.
+///
+/// The 503 acquire-timeout (`WALK_ACQUIRE_TIMEOUT_SECS`) and the shared
+/// `WALK_SEMAPHORE`/`WALK_METRICS` are the SAME as `guarded_walk` — the
+/// single-pool bounding + staleness observability are preserved exactly.
+/// `spawn_blocking` remains uncancellable: a 504 from this path means the
+/// closure MAY still be running (and for `/rewrite`, MAY have partially or
+/// fully applied mutations to disk).
+pub(crate) async fn guarded_walk_with_deadline<T, F>(
+    request_timeout: Duration,
+    f: F,
+) -> Result<T, (StatusCode, String)>
+where
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    guarded_walk_inner(
+        &WALK_SEMAPHORE,
+        &WALK_METRICS,
+        Duration::from_secs(WALK_ACQUIRE_TIMEOUT_SECS),
+        request_timeout,
         f,
     )
     .await

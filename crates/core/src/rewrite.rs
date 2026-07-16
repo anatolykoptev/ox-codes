@@ -104,9 +104,22 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         max_file_bytes: None,
     };
 
-    for (path, rel_path, metadata) in
-        filtered_walk(root, None, include.as_ref(), exclude.as_ref(), budget)
-    {
+    // Bind the walk (don't consume it anonymously) so we can read
+    // `walk.truncated()` after the loop — mirroring the read path
+    // (`analyze_uncached` in crates/server/src/dataflow.rs). Without this,
+    // files beyond `max_files` are silently NOT rewritten with no signal to
+    // the caller (the cap is enforced inside `FilteredWalk::next`, but the
+    // old `for ... in filtered_walk(...)` consumed the iterator inline and
+    // never read `truncated()`).
+    let mut walk = filtered_walk(root, None, include.as_ref(), exclude.as_ref(), budget);
+    // Tracks whether the loop exited via the `max_results` early-break (vs.
+    // natural exhaustion). The early-break can fire at exactly `count == cap`,
+    // where the walk's cap check (which runs on the NEXT pull, not the current
+    // one) never gets a chance to set `truncated` — a real max_files truncation
+    // is silently missed. The post-loop probe below closes that gap, parity
+    // with the read path's `broke_early` handling.
+    let mut broke_early = false;
+    for (path, rel_path, metadata) in walk.by_ref() {
         if !file_matches_lang(&path, &lang_name) {
             continue;
         }
@@ -256,8 +269,24 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         });
 
         if total_matches >= input.max_results {
+            broke_early = true;
             break;
         }
+    }
+
+    // `walk.truncated()` is the sole source of truth: true iff a qualifying
+    // file existed beyond position cap (checked after pulling, not before).
+    // Mirrors the read path (`analyze_uncached`).
+    let mut files_truncated = walk.truncated();
+    // Early-break edge case: if the `max_results` budget fired at exactly
+    // `count == cap`, the walk's cap check never ran (it fires on the NEXT
+    // pull, which we skipped by breaking). Probe one more pull: if the cap is
+    // hit, `FilteredWalk::next` sets `truncated` internally and returns None;
+    // we re-read `walk.truncated()`. If the walk naturally exhausts, truncated
+    // stays false — no false positive. Parity with the read path's probe.
+    if broke_early && input.max_files.is_some() && !files_truncated {
+        let _ = walk.next();
+        files_truncated = walk.truncated();
     }
 
     let total_files = files.len();
@@ -268,6 +297,7 @@ pub fn rewrite(input: RewriteInput) -> Result<RewriteResponse> {
         total_files,
         duration_ms: start.elapsed().as_millis() as u64,
         rejected,
+        files_truncated,
     })
 }
 
@@ -911,6 +941,112 @@ mod tests {
             "only the small file must be in files"
         );
         assert!(result.files[0].file.contains("small.go"));
+    }
+
+    /// F1 — silent file-COUNT truncation on the mutation path: when more
+    /// matching files exist than `max_files`, the walk caps at `max_files` and
+    /// files beyond the cap are NOT rewritten. `files_truncated` must surface
+    /// this (mirroring `DataflowResponse.files_truncated` on the read path),
+    /// and the returned rewrites must be exactly the first `max_files` files in
+    /// walk (sorted-path) order. REDS if the walk is consumed anonymously
+    /// without reading `walk.truncated()` (files_truncated stays false) or if
+    /// the `files_truncated` field is missing from `RewriteResponse`.
+    #[test]
+    fn test_rewrite_files_truncated_true_when_cap_exceeded() {
+        let dir = TempDir::new().unwrap();
+        // 5 matching .go files, cap at 3 → walk yields the first 3 in sorted
+        // path order (f00, f01, f02); f03/f04 are beyond cap (not rewritten).
+        for i in 0..5u8 {
+            let name = format!("f{i:02}.go");
+            fs::write(
+                dir.path().join(&name),
+                "package main\nfunc f() {\nif err != nil { return err }\n}\n",
+            )
+            .unwrap();
+        }
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: true,
+            max_files: Some(3),
+        };
+        let result = rewrite(input).unwrap();
+
+        // files_truncated must be true — 2 qualifying files were beyond cap.
+        assert!(
+            result.files_truncated,
+            "files_truncated must be true when more matching files exist than max_files"
+        );
+        // Exactly the first 3 files (in sorted path order) were rewritten.
+        assert_eq!(
+            result.files.len(),
+            3,
+            "only the first max_files (3) files must be in files; got {:?}",
+            result.files.iter().map(|f| &f.file).collect::<Vec<_>>()
+        );
+        let rewritten: Vec<&str> = result.files.iter().map(|f| f.file.as_str()).collect();
+        assert!(
+            rewritten
+                .iter()
+                .all(|f| f.contains("f00.go") || f.contains("f01.go") || f.contains("f02.go")),
+            "the first 3 sorted-path files must be rewritten; got {rewritten:?}"
+        );
+        // The beyond-cap files were NOT rewritten.
+        for i in 3..5u8 {
+            let name = format!("f{i:02}.go");
+            let content = fs::read_to_string(dir.path().join(&name)).unwrap();
+            assert!(
+                !content.contains("fmt.Errorf"),
+                "beyond-cap file {name} must NOT be rewritten; got: {content}"
+            );
+        }
+    }
+
+    /// F1 — exact-cap boundary: a fixture with EXACTLY `max_files` matching
+    /// files must report `files_truncated == false` (the walk naturally
+    /// exhausted at exactly the cap — no qualifying file was skipped). Mirrors
+    /// the read path's `test_analyze_directory_exact_cap_boundary`. REDS if
+    /// the cap check fires at the top of `FilteredWalk::next` (before pulling)
+    /// instead of after, or if `files_truncated` is wrongly set at count==cap.
+    #[test]
+    fn test_rewrite_files_truncated_false_at_exact_cap() {
+        let dir = TempDir::new().unwrap();
+        // Exactly 3 matching .go files, cap is also 3.
+        for i in 0..3u8 {
+            let name = format!("f{i:02}.go");
+            fs::write(
+                dir.path().join(&name),
+                "package main\nfunc f() {\nif err != nil { return err }\n}\n",
+            )
+            .unwrap();
+        }
+        let input = RewriteInput {
+            root: dir.path().to_string_lossy().into(),
+            pattern: "if $ERR != nil { return $ERR }".into(),
+            rewrite: "if $ERR != nil { return fmt.Errorf(\"wrap: %w\", $ERR) }".into(),
+            language: "go".into(),
+            max_results: 50,
+            file_glob: None,
+            exclude_glob: None,
+            apply: false,
+            max_files: Some(3),
+        };
+        let result = rewrite(input).unwrap();
+        assert_eq!(
+            result.files.len(),
+            3,
+            "all 3 files should be rewritten (dry-run)"
+        );
+        assert!(
+            !result.files_truncated,
+            "files_truncated must be false when the walk naturally exhausted at exactly the cap \
+             (no qualifying file was skipped)"
+        );
     }
 
     /// Serde default: an absent `max_files` field deserializes to

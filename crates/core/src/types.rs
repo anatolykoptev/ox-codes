@@ -138,6 +138,11 @@ pub struct RewriteResponse {
     /// reported here instead of the whole call returning a 400.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rejected: Vec<RewriteRejection>,
+    /// `true` if the walk was cut short by `max_files` (treat the returned
+    /// rewrites as a sample, not exhaustive — files beyond the cap were NOT
+    /// rewritten). Mirrors `DataflowResponse.files_truncated` on the read path
+    /// for cross-endpoint consistency: same name, same shape, always serialized.
+    pub files_truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
