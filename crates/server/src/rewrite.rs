@@ -3,13 +3,13 @@ use axum::http::StatusCode;
 use ox_core::rewrite;
 use ox_core::{RewriteInput, RewriteResponse};
 
-pub async fn handle(
-    Json(input): Json<RewriteInput>,
-) -> Result<Json<RewriteResponse>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(move || rewrite::rewrite(input))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+use crate::dataflow::clamp_max_files;
+use crate::walk_guard::guarded_walk;
 
+pub async fn handle(
+    Json(mut input): Json<RewriteInput>,
+) -> Result<Json<RewriteResponse>, (StatusCode, String)> {
+    input.max_files = clamp_max_files(input.max_files);
+    let result = guarded_walk(move || rewrite::rewrite(input)).await?;
     Ok(Json(result))
 }
