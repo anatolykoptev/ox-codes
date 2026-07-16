@@ -37,6 +37,12 @@ pub struct SearchInput {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub format: Format,
+    /// Hard cap on files walked. Defaults to
+    /// [`crate::walk::DEFAULT_FILE_COUNT_CAP`] (2000). An explicit JSON `null`
+    /// deserializes to `None` (walks everything) — the server clamps both
+    /// `null` and oversized values to its transport max.
+    #[serde(default = "default_max_files")]
+    pub max_files: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
