@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -46,21 +48,28 @@ pub struct ScopeSpan {
 
 /// Parsed source and the scope spans within it.
 /// Holds only `Send + Sync` bytes and ranges so it can live in a shared cache.
+///
+/// `content_hash` is a non-cryptographic hash of the source bytes computed at
+/// insert time. It is used by `get_or_insert_verified` to detect a
+/// same-length, same-mtime in-place edit that the cheap `(mtime, len)` key
+/// cannot distinguish from the original (#48).
 #[derive(Debug, Clone)]
 pub struct CachedScopes {
     pub source: Arc<[u8]>,
     pub spans: Vec<ScopeSpan>,
+    pub content_hash: u64,
 }
 
 /// Cache key for the parsed-scope cache.
 ///
-/// Uses mtime + file length as a cheap fingerprint. A content hash would
-/// require reading the file, defeating the skip-read win. mtime+len is the
-/// standard build-cache fingerprint and is safe for an in-memory read cache.
+/// Uses mtime + file length as a cheap first-pass fingerprint. This alone
+/// cannot detect a same-length in-place edit within the filesystem's mtime
+/// resolution (#48): the key is identical before and after such an edit. The
+/// `ScopeCache::get_or_insert_verified` method closes this gap by re-reading
+/// the file and comparing a content hash (`CachedScopes::content_hash`) when
+/// the key matches, evicting + re-parsing on a mismatch.
 ///
-/// A moka TTL further caps worst-case staleness (see `ScopeCache`) for the
-/// rare case of a same-length in-place edit that lands within the filesystem's
-/// mtime resolution.
+/// A moka TTL further caps worst-case staleness as a defense-in-depth backstop.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     pub canonical_abs_path: PathBuf,
@@ -73,11 +82,11 @@ pub struct CacheKey {
 /// Cross-request cache for parsed scopes.
 ///
 /// Key: (canonical_abs_path, mtime_nanos, file_len, language, scope_kind).
-/// Value: Arc<CachedScopes { source, spans }>.
+/// Value: Arc<CachedScopes { source, spans, content_hash }>.
 ///
 /// Entries carry a moka TTL (default 300s, override via
-/// `OX_CODES_SCOPE_CACHE_TTL_SECS`) that acts as a staleness backstop for the
-/// mtime+len fingerprint without paying for a content hash on every read.
+/// `OX_CODES_SCOPE_CACHE_TTL_SECS`) that acts as a defense-in-depth staleness
+/// backstop alongside the content-hash verification (#48).
 ///
 /// A thin wrapper over [`WeightedEnvCache`] — all byte-weighted capacity / TTL
 /// / env-parsing / kill-switch / hit-miss logic lives in the shared generic.
@@ -97,7 +106,7 @@ impl ScopeCache {
         Self::with_capacity_and_ttl(bytes, DEFAULT_TTL_SECS)
     }
 
-    fn with_capacity_and_ttl(bytes: u64, ttl_secs: u64) -> Self {
+    pub fn with_capacity_and_ttl(bytes: u64, ttl_secs: u64) -> Self {
         Self {
             inner: WeightedEnvCache::with_capacity_and_ttl(
                 bytes,
@@ -133,12 +142,35 @@ impl ScopeCache {
         self.inner.get_or_insert(key, init)
     }
 
+    /// Get or insert with content-hash verification (#48).
+    ///
+    /// On a key match, the `verify` closure is called with the cached value.
+    /// If it returns `false` (content changed but mtime+len did not), the
+    /// stale entry is evicted and `init` re-runs. See
+    /// `WeightedEnvCache::get_or_insert_verified`.
+    pub fn get_or_insert_verified<F, Vf>(
+        &self,
+        key: CacheKey,
+        init: F,
+        verify: Vf,
+    ) -> Result<(Arc<CachedScopes>, bool)>
+    where
+        F: FnOnce() -> Result<Arc<CachedScopes>>,
+        Vf: FnOnce(&Arc<CachedScopes>) -> bool,
+    {
+        self.inner.get_or_insert_verified(key, init, verify)
+    }
+
     /// Parse source bytes and extract scope spans using the supplied query.
+    /// The returned `CachedScopes` carries a content hash of the source for
+    /// staleness verification (#48).
     pub fn parse_scopes(
         source: Vec<u8>,
         query: &Query,
         language: &Language,
     ) -> Result<CachedScopes> {
+        let content_hash = hash_content(&source);
+
         let mut parser = Parser::new();
         parser.set_language(language)?;
         let tree = parser
@@ -160,8 +192,35 @@ impl ScopeCache {
         }
 
         let source = Arc::from(source.into_boxed_slice());
-        Ok(CachedScopes { source, spans })
+        Ok(CachedScopes {
+            source,
+            spans,
+            content_hash,
+        })
     }
+}
+
+/// Compute a fast non-cryptographic content hash of `bytes` using the stdlib
+/// `DefaultHasher` (SipHash 1-3). Used as a content fingerprint stored in
+/// `CachedScopes::content_hash` and compared by `get_or_insert_verified` to
+/// detect a same-length, same-mtime in-place edit that the `(mtime, len)`
+/// cache key cannot distinguish (#48).
+///
+/// No new dependency is introduced — `DefaultHasher` is already used for the
+/// dataflow aggregate fingerprint (`crates/server/src/dataflow.rs`). A
+/// dedicated xxhash/ahash would be faster for large files, but SipHash is
+/// adequate for source files (typically <1 MB) and avoids a supply-chain
+/// addition for a correctness fix.
+// INVARIANT: the hasher MUST be seed-stable across calls (fixed, non-random keys).
+// `DefaultHasher::new()` is fixed-seed, so the insert-side hash (at parse time) and
+// the verify-side hash (on the cache-hit re-read) are comparable. Do NOT swap this for
+// `RandomState`/ahash-with-a-random-seed: a per-call seed would make verify always
+// mismatch, silently treating every cache hit as stale → permanent full-cache bypass
+// (no error, just a parse on every request).
+pub fn hash_content(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(bytes);
+    hasher.finish()
 }
 
 impl Default for ScopeCache {

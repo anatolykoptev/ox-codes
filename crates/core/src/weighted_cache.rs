@@ -140,6 +140,55 @@ where
             }
         }
     }
+
+    /// Get or insert with content-hash verification (#48).
+    ///
+    /// Like `get_or_insert`, but on a key match the `verify` closure is called
+    /// with the cached value. If `verify` returns `false` the entry is treated
+    /// as STALE: it is invalidated and `init` re-runs to produce a fresh value.
+    /// This closes the mtime+len fingerprint gap where a same-length in-place
+    /// edit within the filesystem's mtime resolution leaves the key unchanged
+    /// but the content different.
+    ///
+    /// The `verify` closure is responsible for any I/O it needs (e.g.
+    /// re-reading the file and comparing a content hash). It is only called on
+    /// the key-match path — a clear miss (different mtime/len) skips it
+    /// entirely, so the hot-path cost is bounded to the cases where the cheap
+    /// fingerprint already matched.
+    pub fn get_or_insert_verified<F, Vf>(&self, key: K, init: F, verify: Vf) -> Result<(V, bool)>
+    where
+        F: FnOnce() -> Result<V>,
+        Vf: FnOnce(&V) -> bool,
+    {
+        // Fast path: existing entry that passes content verification.
+        if let Some(v) = self.cache.get(&key) {
+            if verify(&v) {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                return Ok((v, true));
+            }
+            // Stale (key matched but content differs): evict so the
+            // try_get_with below re-runs init instead of returning the
+            // stale value.
+            self.cache.invalidate(&key);
+        }
+        // Miss or stale-then-evicted: run init and insert.
+        let stats = Arc::clone(&self.stats);
+        let value = self.cache.try_get_with(key, move || {
+            stats.analyses.fetch_add(1, Ordering::Relaxed);
+            init()
+        });
+
+        match value {
+            Ok(v) => {
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                Ok((v, false))
+            }
+            Err(e) => {
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                Err(anyhow::anyhow!("{e}"))
+            }
+        }
+    }
 }
 
 /// Read `env` and resolve it to a u64, falling back to `default` on
