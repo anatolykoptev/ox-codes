@@ -7,7 +7,7 @@ use std::time::Instant;
 use tree_sitter::Query;
 
 use crate::grep_filter::build_globset;
-use crate::scope_cache::{CacheKey, CachedScopes, ScopeCache};
+use crate::scope_cache::{CacheKey, CachedScopes, ScopeCache, hash_content};
 use crate::types::{ExpandMode, ExpandedMatch, ExpandedSearchResponse, ScopedSearchInput};
 use crate::walk::{DEFAULT_MAX_FILE_BYTES, WalkBudget, filtered_walk};
 use ox_langs::{effective_language_id, get_language, get_scope_query, language_id};
@@ -90,16 +90,30 @@ pub fn scoped_search(
             .and_then(|id| get_language(id).map(|c| c.language))
             .unwrap_or_else(|| lang_cfg.language.clone());
         let lang = per_file_lang.clone();
-        let (cached, _is_hit) = cache.get_or_insert(key, move || {
-            // Compile the scope query lazily INSIDE the closure so it runs only
-            // on a cache MISS — building it per-file before this point
-            // recompiled the tree-sitter Query even on cache HITs, defeating
-            // the point of ScopeCache (re-review #55).
-            let query = Query::new(&lang, query_str)?;
-            let source = std::fs::read(&canonical)?;
-            let scopes = ScopeCache::parse_scopes(source, &query, &lang)?;
-            Ok(Arc::new(scopes))
-        })?;
+        let verify_path = canonical.clone();
+        let (cached, _is_hit) = cache.get_or_insert_verified(
+            key,
+            move || {
+                // Compile the scope query lazily INSIDE the closure so it runs only
+                // on a cache MISS — building it per-file before this point
+                // recompiled the tree-sitter Query even on cache HITs, defeating
+                // the point of ScopeCache (re-review #55).
+                let query = Query::new(&lang, query_str)?;
+                let source = std::fs::read(&canonical)?;
+                let scopes = ScopeCache::parse_scopes(source, &query, &lang)?;
+                Ok(Arc::new(scopes))
+            },
+            |cached| {
+                // #48: on a (mtime, len) key match, re-read the file and
+                // compare a content hash to the one stored at insert time. A
+                // mismatch means a same-length in-place edit landed within
+                // the filesystem's mtime resolution — the entry is stale.
+                match std::fs::read(&verify_path) {
+                    Ok(bytes) => hash_content(&bytes) == cached.content_hash,
+                    Err(_) => false,
+                }
+            },
+        )?;
 
         let file_matches = search_in_scopes(
             &cached,
@@ -553,5 +567,75 @@ function App() {
         let input: ScopedSearchInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.max_files, Some(crate::walk::DEFAULT_FILE_COUNT_CAP));
         assert_eq!(input.max_files, Some(2000));
+    }
+
+    /// Regression test for issue #48: a same-length in-place edit that lands
+    /// within the filesystem's mtime resolution must NOT be served stale.
+    ///
+    /// The old `(mtime, len)` fingerprint is identical before and after such an
+    /// edit, so with TTL=0 (no time-based eviction) the cache would serve the
+    /// OLD content permanently. This test writes a file, populates the cache,
+    /// then edits the file IN PLACE keeping the exact same byte length and
+    /// restoring the original mtime via `FileTimes::set_modified`, then asserts
+    /// the second search returns the NEW content (the BBBBBB marker), not the
+    /// stale AAAA marker.
+    ///
+    /// Reverting the content-hash fingerprint (back to mtime+len only) REDS
+    /// this test: the second run serves the cached old source and finds AAAA.
+    #[test]
+    fn test_cache_invalidation_same_length_same_mtime() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("main.go");
+
+        // Original content with marker AAAA.
+        let original = "package main\n\nfunc main() {\n    // TODO_AAAAAA\n}\n";
+        fs::write(&file_path, original).unwrap();
+
+        // TTL=0 (no time-based eviction) to exercise the worst case: the ONLY
+        // staleness guard is the fingerprint itself.
+        let cache = ScopeCache::with_capacity_and_ttl(64 * 1024 * 1024, 0);
+        let input = go_input(&dir.path().to_string_lossy());
+
+        // Populate the cache.
+        let run1 = scoped_search(input.clone(), &cache).unwrap();
+        assert!(
+            run1.matches.iter().any(|m| m.text.contains("AAAAAA")),
+            "first run should find the AAAA marker"
+        );
+
+        // Capture the original mtime from the canonical path (the same path
+        // the cache key reads metadata from).
+        let canonical = std::fs::canonicalize(&file_path).unwrap();
+        let original_mtime = std::fs::metadata(&canonical).unwrap().modified().unwrap();
+
+        // Edit in-place: same byte length, different content (AAAA → BBBB).
+        let edited = "package main\n\nfunc main() {\n    // TODO_BBBBBB\n}\n";
+        assert_eq!(
+            original.len(),
+            edited.len(),
+            "test setup: edited content must have the same byte length"
+        );
+        fs::write(&canonical, edited).unwrap();
+
+        // Restore the original mtime so the (mtime, len) fingerprint is
+        // identical to the pre-edit state.
+        let file = std::fs::File::open(&canonical).unwrap();
+        let times = std::fs::FileTimes::new().set_modified(original_mtime);
+        file.set_times(times).unwrap();
+
+        // Second run: the cache must detect the content change and serve the
+        // NEW content, not the stale cached source.
+        let run2 = scoped_search(input, &cache).unwrap();
+        assert!(
+            run2.matches.iter().any(|m| m.text.contains("BBBBBB")),
+            "second run must find the NEW BBBBBB marker, not the stale AAAA marker; \
+             got {:?}",
+            run2.matches
+        );
+        assert!(
+            !run2.matches.iter().any(|m| m.text.contains("AAAAAA")),
+            "second run must NOT serve the stale AAAA marker; got {:?}",
+            run2.matches
+        );
     }
 }
