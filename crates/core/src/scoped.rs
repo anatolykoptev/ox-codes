@@ -110,7 +110,13 @@ pub fn scoped_search(
                 // the filesystem's mtime resolution — the entry is stale.
                 match std::fs::read(&verify_path) {
                     Ok(bytes) => hash_content(&bytes) == cached.content_hash,
-                    Err(_) => false,
+                    // File vanished/unreadable between the stat above and this re-read
+                    // (TOCTOU). Keep the cached entry (stale-but-successful) instead of
+                    // returning false: a false here forces a re-init whose own read would
+                    // also fail and hard-error the whole request. This matches the walk's
+                    // resilient-skip on missing files (see the `continue`s at metadata/
+                    // canonicalize above) and the pre-#48 hit-path behaviour.
+                    Err(_) => true,
                 }
             },
         )?;

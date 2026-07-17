@@ -211,6 +211,12 @@ impl ScopeCache {
 /// dedicated xxhash/ahash would be faster for large files, but SipHash is
 /// adequate for source files (typically <1 MB) and avoids a supply-chain
 /// addition for a correctness fix.
+// INVARIANT: the hasher MUST be seed-stable across calls (fixed, non-random keys).
+// `DefaultHasher::new()` is fixed-seed, so the insert-side hash (at parse time) and
+// the verify-side hash (on the cache-hit re-read) are comparable. Do NOT swap this for
+// `RandomState`/ahash-with-a-random-seed: a per-call seed would make verify always
+// mismatch, silently treating every cache hit as stale → permanent full-cache bypass
+// (no error, just a parse on every request).
 pub fn hash_content(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(bytes);
