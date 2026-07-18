@@ -20,4 +20,4 @@ install-tools:
 	cargo binstall --no-confirm cargo-nextest
 
 deploy:
-	cd ~/deploy/krolik-server && docker compose build --no-cache ox-codes && docker compose up -d --no-deps --force-recreate ox-codes
+	cd ~/deploy/server-config && docker compose build --no-cache ox-codes && docker compose up -d --no-deps --force-recreate ox-codes
