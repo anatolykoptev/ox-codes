@@ -27,12 +27,12 @@ go-code:
   tmpfs:
     - /tmp
   volumes:
-    - /home/krolik:/host:ro                            # local repos
+    - /home/user:/host:ro                            # local repos
     - go_code_workspace:/tmp/go-code-workspace          # remote clones (RW)
 
 ox-codes:
   volumes:
-    - /home/krolik:/host:ro                            # same path on both sides
+    - /home/user:/host:ro                            # same path on both sides
     - go_code_workspace:/tmp/go-code-workspace:ro      # same path, RO
 ```
 
@@ -159,7 +159,7 @@ Maps consumer-side concepts to filesystem paths. Helpful when reading go-code so
 
 | Consumer concept | go-code path | ox-codes path | Volume |
 |---|---|---|---|
-| Local repo on host | `/home/krolik/src/foo` → translated to `/host/src/foo` via `PATH_MAPPINGS` | `/host/src/foo` | bind mount `/home/krolik:/host:ro` |
+| Local repo on host | `/home/user/src/foo` → translated to `/host/src/foo` via `PATH_MAPPINGS` | `/host/src/foo` | bind mount `/home/user:/host:ro` |
 | Remote clone (`owner/repo` slug) | `/tmp/go-code-workspace/<slug>` | `/tmp/go-code-workspace/<slug>` | docker volume `go_code_workspace` |
 
 Both are read-only from ox-codes' perspective — see `docker inspect ox-codes` to confirm.
@@ -178,7 +178,7 @@ Checklist:
 
 ## Operational notes
 
-**Where the service runs:** docker container `ox-codes`, host port `127.0.0.1:8904` → container `:8902`. Restart with `docker compose up -d --no-deps --force-recreate ox-codes` from `~/deploy/krolik-server`.
+**Where the service runs:** docker container `ox-codes`, host port `127.0.0.1:8904` → container `:8902`. Restart with `docker compose up -d --no-deps --force-recreate ox-codes` from `~/deploy/server-config`.
 
 **Auto-deploy:** dozor watches `anatolykoptev/ox-codes` repo (config in `~/.dozor/deploy-repos.yaml`). Push to `master` → docker rebuild → smoke probe `/health`. Roughly 1–3 min depending on cargo cache.
 
