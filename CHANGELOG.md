@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.3](https://github.com/anatolykoptev/ox-codes/compare/v0.1.2...v0.1.3) (2026-07-24)
+
+
+### Added
+
+* **dataflow:** add built-in Rust taint rules (command injection, path traversal, deserialization, SQL injection) ([#76](https://github.com/anatolykoptev/ox-codes/issues/76)) ([647ceb1](https://github.com/anatolykoptev/ox-codes/commit/647ceb179c3df49048be71224db5254a694b6bd6))
+
+
+### Fixed
+
+* add content hash to file-cache fingerprint so same-length in-place edits invalidate ([#48](https://github.com/anatolykoptev/ox-codes/issues/48)) ([#79](https://github.com/anatolykoptev/ox-codes/issues/79)) ([56d28c1](https://github.com/anatolykoptev/ox-codes/commit/56d28c10496371f90e288746be89e0db2b2b6c94))
+* **dataflow:** use method-name patterns for Rust taint rules — match func_name() output ([#78](https://github.com/anatolykoptev/ox-codes/issues/78)) ([acfcca4](https://github.com/anatolykoptev/ox-codes/commit/acfcca4807ba16cc365cd0a4f78344183d6cbbbf))
+* **grep:** brace-aware file_glob comma split (Closes [#81](https://github.com/anatolykoptev/ox-codes/issues/81)) ([#82](https://github.com/anatolykoptev/ox-codes/issues/82)) ([f00f438](https://github.com/anatolykoptev/ox-codes/commit/f00f438ab8f9153b9359d4c8d2f0a77142bb650a))
+
 ## [0.1.2](https://github.com/anatolykoptev/ox-codes/compare/v0.1.1...v0.1.2) (2026-07-16)
 
 
