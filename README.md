@@ -1,6 +1,6 @@
 # ox-codes
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 1.97+](https://img.shields.io/badge/rust-1.97%2B-orange.svg)](https://www.rust-lang.org)
 [![Docker ready](https://img.shields.io/badge/docker-ready-2496ED.svg)](Dockerfile)
 
@@ -102,4 +102,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Please follow the [Code of Conduct](CODE
 
 ## License
 
-MIT — see [LICENSE](LICENSE). All documents are listed in [docs/INDEX.md](docs/INDEX.md).
+Dual-licensed under [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE), at your option. All documents are listed in [docs/INDEX.md](docs/INDEX.md).
