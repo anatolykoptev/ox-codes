@@ -30,7 +30,7 @@ Then send a search request:
 ```sh
 curl -s -X POST http://127.0.0.1:8902/search \
   -H 'Content-Type: application/json' \
-  -d '{"root":"/path/to/repo","pattern":"TODO","language":"go"}' | jq .
+  -d '{"root":"/path/to/repo","pattern":"FIXME","language":"go"}' | jq .
 ```
 
 Response:
@@ -38,7 +38,7 @@ Response:
 ```json
 {
   "matches": [
-    { "file": "cmd/main.go", "line": 42, "text": "// TODO: handle error" }
+    { "file": "cmd/main.go", "line": 42, "text": "// FIXME: handle error" }
   ],
   "total_matches": 1,
   "truncated": false,
@@ -60,6 +60,10 @@ Response:
 | `GET /cache/stats` | — | Hit/miss counters + entry counts for the scoped and dataflow result caches |
 
 All search endpoints support `expand` (`"none"` / `"function"` / `"block"`) and `max_tokens` for returning full enclosing AST blocks instead of single matched lines.
+
+## Configuration
+
+The service listens on the port given by `--port` (8902 in the examples). Cache limits are set through environment variables: `OX_CODES_SCOPE_CACHE_BYTES`, `OX_CODES_SCOPE_CACHE_TTL_SECS`, `OX_CODES_DATAFLOW_CACHE_BYTES`, `OX_CODES_DATAFLOW_CACHE_ENTRIES` and `OX_CODES_DATAFLOW_CACHE_TTL_SECS`; `GET /cache/stats` shows the live counters.
 
 ## Documentation
 
@@ -98,4 +102,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Please follow the [Code of Conduct](CODE
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). All documents are listed in [docs/INDEX.md](docs/INDEX.md).
