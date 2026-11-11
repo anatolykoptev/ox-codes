@@ -4,7 +4,7 @@ members = ["crates/core", "crates/dataflow", "crates/langs", "crates/server"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 authors = ["Anatoly Koptev"]
 repository = "https://github.com/anatolykoptev/ox-codes"
 readme = "README.md"
