@@ -8,10 +8,10 @@ Thanks for your interest! Quick guide:
 git clone https://github.com/anatolykoptev/ox-codes
 cd ox-codes
 make build   # cargo build --workspace
-make test    # cargo nextest run --workspace
+make test    # cargo nextest run --workspace + doctests
 ```
 
-Requires Rust 1.93+ and `cargo-nextest` (install: `cargo install cargo-nextest`).
+Requires Rust 1.97+ and `cargo-nextest` (install: `cargo install cargo-nextest`).
 
 ## Submitting changes
 
@@ -19,7 +19,7 @@ Requires Rust 1.93+ and `cargo-nextest` (install: `cargo install cargo-nextest`)
 2. Make changes + add tests
 3. Verify locally: `make test && cargo deny check`
 4. Commit with [Conventional Commits](https://www.conventionalcommits.org) format (`feat:`, `fix:`, `chore:`, etc.)
-5. Open PR against `master`
+5. Open a PR against `main`
 
 ## Code style
 
