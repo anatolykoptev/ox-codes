@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.4](https://github.com/anatolykoptev/ox-codes/compare/v0.1.3...v0.1.4) (2026-11-14)
+
+
+### Fixed
+
+* **deps:** update tokio to 1.54.1 and hyper to 1.12.0 for cargo-deny ([#89](https://github.com/anatolykoptev/ox-codes/issues/89)) ([93411b0](https://github.com/anatolykoptev/ox-codes/commit/93411b020425ca5fde9a12e878f4c8d59d8dc025))
+
+
+### Documentation
+
+* bring repository documents up to the repo-standards set [skip ci] ([#87](https://github.com/anatolykoptev/ox-codes/issues/87)) ([8f2482e](https://github.com/anatolykoptev/ox-codes/commit/8f2482e784d630e711c6bb6c388d83d9a6597f14))
+
 ## [0.1.3](https://github.com/anatolykoptev/ox-codes/compare/v0.1.2...v0.1.3) (2026-07-24)
 
 
