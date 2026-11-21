@@ -30,4 +30,4 @@ Requires Rust 1.97+ and `cargo-nextest` (install: `cargo install cargo-nextest`)
 
 ## License
 
-By contributing, you agree your contributions are licensed under MIT.
+By contributing, you agree your contributions are licensed under MIT OR Apache-2.0, as described in the licence section of the README, without any additional terms or conditions.

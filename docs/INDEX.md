@@ -12,4 +12,5 @@
 | [ROADMAP](ROADMAP.md) | Phase status: what is done and what comes next (written in Russian). |
 | [SECURITY](../SECURITY.md) | How to report a vulnerability. |
 | [CODE_OF_CONDUCT](../CODE_OF_CONDUCT.md) | Contributor Covenant code of conduct. |
-| [LICENSE](../LICENSE) | MIT licence text. |
+| [LICENSE-MIT](../LICENSE-MIT) | MIT licence text (one of the two licences, at your option). |
+| [LICENSE-APACHE](../LICENSE-APACHE) | Apache License 2.0 text (the other licence, at your option). |
